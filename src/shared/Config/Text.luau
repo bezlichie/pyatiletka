@@ -22,6 +22,7 @@ return {
 		no_input = { ru = "нет сырья", en = "no input" },
 		output_full = { ru = "склад полон", en = "storage full" },
 		no_workers = { ru = "нет рабочих", en = "no workers" },
+		no_road = { ru = "нет дороги", en = "no road access" },
 	} :: { [string]: Text },
 
 	buildErrors = {
@@ -33,10 +34,12 @@ return {
 		bad_size = { ru = "Ошибка размера", en = "Bad size" },
 		not_found = { ru = "Здание не найдено", en = "Building not found" },
 		too_fast = { ru = "Слишком быстро", en = "Too fast" },
+		too_long = { ru = "Слишком длинная дорога", en = "Road is too long" },
 	} :: { [string]: Text },
 
 	buildMode = {
 		demolish = { ru = "Снос", en = "Demolish" },
+		road = { ru = "Дорога", en = "Road" },
 		cancel = { ru = "Отмена", en = "Cancel" },
 		placeHint = {
 			ru = "ЛКМ — поставить · R — повернуть · та же цифра или «Отмена» — выйти",
@@ -46,8 +49,16 @@ return {
 			ru = "Коснитесь места, затем коснитесь ещё раз, чтобы поставить",
 			en = "Tap a spot, then tap again to place",
 		},
+		roadHintTouch = {
+			ru = "Коснитесь начала, затем конца, затем конца ещё раз, чтобы проложить",
+			en = "Tap the start, then the end, then the end again to build",
+		},
+		roadHint = {
+			ru = "ЛКМ — начало, ЛКМ ещё раз — конец участка · та же цифра или «Отмена» — выйти",
+			en = "LMB — start, LMB again — end of segment · same number or Cancel — exit",
+		},
 		demolishHint = {
-			ru = "ЛКМ по зданию — снести · X или «Отмена» — выйти",
+			ru = "ЛКМ по зданию или дороге — снести · X или «Отмена» — выйти",
 			en = "Click a building to demolish · X or Cancel — exit",
 		},
 	} :: { [string]: Text },
