@@ -12,6 +12,7 @@ local Roads = require("../src/shared/Sim/Roads")
 local RoadsConfig = require("../src/shared/Config/Roads")
 local Logistics = require("../src/shared/Sim/Logistics")
 local TrucksConfig = require("../src/shared/Config/Trucks")
+local Construction = require("../src/shared/Sim/Construction")
 
 local passed, failed = 0, 0
 
@@ -362,11 +363,14 @@ local function makeWorld()
 	roadLine(r, 0, 0, 20, 0)
 	local w = {
 		roads = r,
-		stock = { f = 10, s = 0 },
-		exists = { depot = true, f = true, s = true },
+		stock = { f = 10, s = 0, s2 = 0 },
+		exists = { depot = true, f = true, s = true, s2 = true },
 		released = {},
+		demands = {},
+		caps = {}, -- ёмкость склада получателя (нет — без ограничения)
 	}
-	local doors = { depot = { x = 0, z = 0 }, f = { x = 10, z = 0 }, s = { x = 20, z = 0 } }
+	local doors =
+		{ depot = { x = 0, z = 0 }, f = { x = 10, z = 0 }, s = { x = 20, z = 0 }, s2 = { x = 15, z = 0 } }
 	w.api = {
 		findPath = function(from, to)
 			return Roads.findPath(r, from, to)
@@ -386,11 +390,26 @@ local function makeWorld()
 			return n
 		end,
 		deliver = function(id, _res, amount)
+			local cap = w.caps[id]
+			if cap then
+				amount = math.min(amount, cap - w.stock[id])
+			end
 			w.stock[id] += amount
 			return amount
 		end,
 		release = function(job, side)
 			table.insert(w.released, side)
+		end,
+		-- Другие получатели: id -> свободное место.
+		claimDemand = function(_res, amount)
+			for id, space in w.demands do
+				if space > 0 and w.exists[id] then
+					local n = math.min(space, amount)
+					w.demands[id] -= n
+					return id, n
+				end
+			end
+			return nil, 0
 		end,
 	}
 	return w
@@ -471,7 +490,7 @@ test("без дороги до получателя заказ не выдаёт
 end)
 
 test(
-	"снос дороги или здания в пути срывает заказ и снимает резервы",
+	"снос дороги до погрузки срывает заказ и снимает резервы",
 	function()
 		local w = makeWorld()
 		local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
@@ -481,16 +500,69 @@ test(
 		runTruck(t, w, 2)
 		eq(t.state, "idle", "заказ сорван")
 		eq(#w.released, 2, "оба резерва сняты")
+		eq(t.cargo, 0, "груза нет")
+	end
+)
 
-		local w2 = makeWorld()
-		local t2 = Logistics.newTruck("t2", "depot", { x = 0, z = 0 })
-		Logistics.dispatch(t2, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w2.api)
-		runTruck(t2, w2, 6)
-		eq(t2.state, "to_dropoff", "везёт")
-		w2.exists.s = false
-		runTruck(t2, w2, 6)
-		eq(t2.state, "idle", "получателя нет")
-		eq(t2.cargo, 0, "груз пропал")
+test(
+	"получателя снесли в пути: груз едет домой и ждёт, а не пропадает",
+	function()
+		local w = makeWorld()
+		local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+		Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+		runTruck(t, w, 6)
+		eq(t.state, "to_dropoff", "везёт")
+		w.exists.s = false
+		Logistics.step(t, 0.25, truckConfig, w.api)
+		eq(t.state, "returning", "сразу повернул домой")
+		eq(t.cargo, 6, "груз в кузове")
+		runTruck(t, w, 10)
+		eq(t.state, "idle", "ждёт дома")
+		eq(t.cell.x, 0, "у автопарка")
+		local again =
+			Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+		eq(again, nil, "с грузом новый заказ не берёт")
+		-- Появился новый получатель — грузовик везёт груз ему.
+		w.demands.s2 = 10
+		Logistics.redirect(t, w.api)
+		eq(t.state, "to_dropoff", "везёт новому получателю")
+		runTruck(t, w, 10)
+		eq(w.stock.s2, 6, "доставлено")
+		eq(t.cargo, 0, "кузов пуст")
+	end
+)
+
+test(
+	"получателя снесли в пути, но есть другой: едет сразу к нему",
+	function()
+		local w = makeWorld()
+		w.demands.s2 = 4
+		w.caps.s2 = 4
+		local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+		Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+		runTruck(t, w, 6)
+		w.exists.s = false
+		Logistics.step(t, 0.25, truckConfig, w.api)
+		eq(t.state, "to_dropoff", "везёт")
+		assert(t.job and t.job.to == "s2", "к другому получателю")
+		runTruck(t, w, 6)
+		eq(w.stock.s2, 4, "принято сколько влезло")
+		eq(t.cargo, 2, "остаток в кузове")
+		eq(t.state, "returning", "с остатком домой")
+	end
+)
+
+test(
+	"получателя снесли до погрузки: заказ срывается сразу",
+	function()
+		local w = makeWorld()
+		local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+		Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+		runTruck(t, w, 1)
+		w.exists.s = false
+		Logistics.step(t, 0.25, truckConfig, w.api)
+		eq(t.state, "idle", "сорван сразу")
+		eq(w.stock.f, 10, "у отправителя ничего не забрали")
 	end
 )
 
@@ -514,6 +586,64 @@ test("конфиг грузовиков корректный", function()
 	assert(TrucksConfig.perDepot >= 1, "perDepot")
 	assert(TrucksConfig.capacity >= TrucksConfig.minLoad, "capacity")
 	assert(TrucksConfig.cellsPerSecond > 0, "скорость")
+end)
+
+-- Стройка
+
+test(
+	"стройплощадка принимает только нужное и не больше нормы",
+	function()
+		local site = Construction.new({ boards = 8 }, 10)
+		eq(Construction.deliver(site, "boards", 6), 6, "первая партия")
+		eq(Construction.deliver(site, "logs", 5), 0, "чужой материал")
+		eq(Construction.deliver(site, "boards", 6), 2, "только остаток")
+		eq(Construction.remaining(site, "boards"), 0, "остаток")
+		eq(Construction.hasAllMaterials(site), true, "всё привезено")
+	end
+)
+
+test("стройка идёт только когда все материалы на месте", function()
+	local site = Construction.new({ boards = 4, logs = 2 }, 5)
+	Construction.deliver(site, "boards", 4)
+	eq(Construction.tick(site, 10), false, "без брёвен не строится")
+	eq(site.progress, 0, "прогресс стоит")
+	Construction.deliver(site, "logs", 2)
+	eq(Construction.tick(site, 3), false, "строится")
+	eq(Construction.tick(site, 3), true, "достроено")
+	eq(Construction.deliver(site, "boards", 1), 0, "после стройки не принимает")
+end)
+
+test(
+	"у зданий со стройкой корректная цена и тексты материалов",
+	function()
+		local any = false
+		for id, b in Buildings do
+			if b.cost then
+				any = true
+				assert(b.buildSeconds and b.buildSeconds >= 0, `{id}: buildSeconds`)
+				for res, n in b.cost do
+					assert(n > 0 and n % 1 == 0, `{id}: цена {res}`)
+					assert(Text.resources[res], `{id}: нет текста для {res}`)
+				end
+			end
+		end
+		assert(any, "хотя бы одно здание строится из материалов")
+		assert(
+			Buildings.forestry.cost == nil and Buildings.sawmill.cost == nil,
+			"стартовая цепочка бесплатна"
+		)
+	end
+)
+
+test("цепочка: доски с лесопилки едут на стройку дома", function()
+	local jobs = Logistics.candidates(
+		{ { id = "saw", resource = "boards", amount = 3, full = false } },
+		{ { id = "house", resource = "boards", amount = 8 } },
+		truckConfig
+	)
+	eq(#jobs, 1, "заказ")
+	eq(jobs[1].to, "house", "куда")
+	eq(jobs[1].amount, 3, "сколько")
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)

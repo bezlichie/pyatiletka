@@ -59,6 +59,25 @@ local world: Logistics.World = {
 	end,
 	take = BuildingService.take,
 	deliver = BuildingService.deliver,
+	claimDemand = function(resource, amount)
+		local bestId, bestSpace = nil, 0
+		for _, id in BuildingService.ids() do
+			for _, demand in BuildingService.demands(id) do
+				if demand.resource == resource then
+					local space = demand.amount - reserved(reservedIn, id, resource)
+					if space > bestSpace then
+						bestId, bestSpace = id, space
+					end
+				end
+			end
+		end
+		if bestId == nil then
+			return nil, 0
+		end
+		local claimed = math.min(amount, bestSpace)
+		reserve(reservedIn, bestId, resource, claimed)
+		return bestId, claimed
+	end,
 	release = function(job, side)
 		if side == "out" then
 			reserve(reservedOut, job.from, job.resource, -job.amount)
@@ -190,26 +209,16 @@ end
 local function collectOrders(): ({ Logistics.Offer }, { Logistics.Demand })
 	local offers, demands = {}, {}
 	for _, id in BuildingService.ids() do
-		local _, recipe, state = BuildingService.info(id)
-		if recipe and state then
-			for resource in recipe.outputs do
-				local free = (state.output[resource] or 0) - reserved(reservedOut, id, resource)
-				if free > 0 then
-					table.insert(offers, {
-						id = id,
-						resource = resource,
-						amount = free,
-						full = state.status == "output_full",
-					})
-				end
+		for _, offer in BuildingService.offers(id) do
+			local free = offer.amount - reserved(reservedOut, id, offer.resource)
+			if free > 0 then
+				table.insert(offers, { id = id, resource = offer.resource, amount = free, full = offer.full })
 			end
-			for resource in recipe.inputs do
-				local space = recipe.storage
-					- (state.input[resource] or 0)
-					- reserved(reservedIn, id, resource)
-				if space > 0 then
-					table.insert(demands, { id = id, resource = resource, amount = space })
-				end
+		end
+		for _, demand in BuildingService.demands(id) do
+			local space = demand.amount - reserved(reservedIn, id, demand.resource)
+			if space > 0 then
+				table.insert(demands, { id = id, resource = demand.resource, amount = space })
 			end
 		end
 	end
@@ -243,7 +252,10 @@ local function step(dt: number)
 				truck.cell = doors[1]
 			end
 		end
-		if truck.state == "idle" then
+		if truck.state == "idle" and truck.cargo > 0 then
+			-- Груз остался в кузове (получателя снесли): ищем, куда его отвезти.
+			Logistics.redirect(truck, world)
+		elseif truck.state == "idle" then
 			-- Заказы пересчитываем для каждого грузовика: предыдущий мог занять резерв.
 			local offers, demands = collectOrders()
 			local job = Logistics.dispatch(truck, Logistics.candidates(offers, demands, TrucksConfig), world)

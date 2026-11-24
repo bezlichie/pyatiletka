@@ -14,6 +14,7 @@ local Text = require(Config:WaitForChild("Text"))
 local Grid = require(Sim:WaitForChild("Grid"))
 local Roads = require(Sim:WaitForChild("Roads"))
 local Production = require(Sim:WaitForChild("Production"))
+local Construction = require(Sim:WaitForChild("Construction"))
 local RegionState = require(script.Parent:WaitForChild("RegionState"))
 
 local BuildingService = {}
@@ -32,7 +33,12 @@ type Entry = {
 	state: Production.State?,
 	label: TextLabel?,
 	note: string?, -- дополнительная строка таблички (например, у автопарка)
+	construction: Construction.State?, -- есть, пока здание — стройплощадка
 }
+
+-- Что здание может отдать грузовику и что принять.
+export type Offer = { resource: string, amount: number, full: boolean }
+export type Demand = { resource: string, amount: number }
 
 local grid = RegionState.grid
 local roads = RegionState.roads
@@ -137,7 +143,27 @@ local function updateLabel(entry: Entry)
 	local name = BuildingsConfig[entry.typeId].name.ru
 	local lines = {}
 	local state = entry.state
-	if state then
+	local site = entry.construction
+	if site then
+		table.insert(lines, `{name}: {Text.labels.construction.ru}`)
+		local materials = {}
+		for resource, need in site.cost do
+			local res = Text.resources[resource]
+			table.insert(
+				materials,
+				`{if res then res.ru else resource} {site.delivered[resource] or 0}/{need}`
+			)
+		end
+		table.sort(materials)
+		table.insert(lines, table.concat(materials, ", "))
+		if Construction.hasAllMaterials(site) then
+			local percent = math.floor(site.progress / math.max(site.buildSeconds, 1e-3) * 100)
+			table.insert(lines, `{Text.labels.building.ru} {percent}%`)
+		else
+			table.insert(lines, Text.labels.waitingMaterials.ru)
+		end
+		entry.model:SetAttribute("Status", "construction")
+	elseif state then
 		local status = Text.status[state.status]
 		table.insert(lines, `{name}: {if status then status.ru else state.status}`)
 		local input = stockText(state.input)
@@ -151,6 +177,7 @@ local function updateLabel(entry: Entry)
 		entry.model:SetAttribute("Status", state.status)
 	else
 		table.insert(lines, name)
+		entry.model:SetAttribute("Status", nil)
 	end
 	if entry.note then
 		table.insert(lines, entry.note)
@@ -167,6 +194,20 @@ local function checkConnection(entry: Entry)
 	entry.connected = #Roads.entrances(roads, entry.x, entry.z, w, d) > 0
 	entry.model:SetAttribute("Connected", entry.connected)
 	updateLabel(entry)
+end
+
+-- Вид стройплощадки: полупрозрачный корпус без крыши.
+local function setSiteLook(model: Model, isSite: boolean)
+	local body = model:FindFirstChild("Body") :: BasePart?
+	local roof = model:FindFirstChild("Roof") :: BasePart?
+	if body then
+		body.Transparency = if isSite then 0.65 else 0
+		body.Material = if isSite then Enum.Material.WoodPlanks else Enum.Material.SmoothPlastic
+	end
+	if roof then
+		roof.Transparency = if isSite then 1 else 0
+	end
+	model:SetAttribute("UnderConstruction", isSite)
 end
 
 -- Ставит здание. Возвращает true и id или false и код ошибки.
@@ -194,6 +235,10 @@ function BuildingService.place(typeId: string, x: number, z: number, rotation: n
 	if recipe then
 		entry.recipe = recipe
 		entry.state = Production.new()
+	end
+	if def.cost then
+		entry.construction = Construction.new(def.cost, def.buildSeconds or 0)
+		setSiteLook(model, true)
 	end
 	checkConnection(entry)
 	model.Parent = folder
@@ -259,12 +304,63 @@ end
 -- Привезти сырьё на входной склад. Возвращает, сколько принято.
 function BuildingService.deliver(id: string, resource: string, amount: number): number
 	local entry = entries[id]
-	if entry == nil or entry.recipe == nil or entry.state == nil then
+	if entry == nil then
 		return 0
 	end
-	local accepted = Production.deliver(entry.recipe, entry.state, resource, amount)
+	local accepted = 0
+	if entry.construction then
+		accepted = Construction.deliver(entry.construction, resource, amount)
+	elseif entry.recipe and entry.state then
+		accepted = Production.deliver(entry.recipe, entry.state, resource, amount)
+	end
 	updateLabel(entry)
 	return accepted
+end
+
+-- Что здание может отдать (без учёта резервов грузовиков).
+function BuildingService.offers(id: string): { Offer }
+	local entry = entries[id]
+	local result = {}
+	if entry == nil or entry.construction or entry.recipe == nil or entry.state == nil then
+		return result
+	end
+	local state = entry.state
+	for resource in entry.recipe.outputs do
+		local amount = state.output[resource] or 0
+		if amount > 0 then
+			table.insert(
+				result,
+				{ resource = resource, amount = amount, full = state.status == "output_full" }
+			)
+		end
+	end
+	return result
+end
+
+-- Что здание может принять (без учёта резервов): материалы стройки или сырьё.
+function BuildingService.demands(id: string): { Demand }
+	local entry = entries[id]
+	local result = {}
+	if entry == nil then
+		return result
+	end
+	local site = entry.construction
+	if site then
+		for resource in site.cost do
+			local need = Construction.remaining(site, resource)
+			if need > 0 then
+				table.insert(result, { resource = resource, amount = need })
+			end
+		end
+	elseif entry.recipe and entry.state then
+		for resource in entry.recipe.inputs do
+			local space = entry.recipe.storage - (entry.state.input[resource] or 0)
+			if space > 0 then
+				table.insert(result, { resource = resource, amount = space })
+			end
+		end
+	end
+	return result
 end
 
 -- Дополнительная строка на табличке здания (nil — убрать).
@@ -294,10 +390,23 @@ end
 -- Один шаг симуляции всех зданий. Пока рабочих хватает всегда: население появится позже.
 function BuildingService.tick(dt: number)
 	for _, entry in entries do
-		local recipe, state = entry.recipe, entry.state
-		if recipe and state then
-			Production.tick(recipe, state, dt, recipe.workers)
+		local site = entry.construction
+		if site then
+			-- Стройплощадка не производит, пока не достроена.
+			if Construction.tick(site, dt) then
+				entry.construction = nil
+				setSiteLook(entry.model, false)
+				print(
+					`[Пятилетка] достроено: {BuildingsConfig[entry.typeId].name.ru} ({entry.id})`
+				)
+			end
 			updateLabel(entry)
+		else
+			local recipe, state = entry.recipe, entry.state
+			if recipe and state then
+				Production.tick(recipe, state, dt, recipe.workers)
+				updateLabel(entry)
+			end
 		end
 	end
 end
