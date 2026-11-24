@@ -1,5 +1,5 @@
 --!strict
--- Точка входа клиента: камера над регионом и отображение сетки.
+-- Точка входа клиента: камера над регионом, отображение сетки и режим стройки.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -9,6 +9,7 @@ local CameraConfig = require(Config:WaitForChild("Camera"))
 local Grid = require(ReplicatedStorage.Shared:WaitForChild("Sim"):WaitForChild("Grid"))
 local RtsCamera = require(script.Parent:WaitForChild("RtsCamera"))
 local GridView = require(script.Parent:WaitForChild("GridView"))
+local BuildMode = require(script.Parent:WaitForChild("BuildMode"))
 
 -- Регион пока один, с центром в начале координат (так же строит землю сервер).
 local grid = Grid.new(GridConfig, 0, 0)
@@ -22,5 +23,6 @@ RtsCamera.start(CameraConfig, {
 	groundY = GridConfig.groundHeight,
 })
 GridView.start(grid, GridConfig.groundHeight)
+BuildMode.start(grid, GridConfig.groundHeight)
 
 print("[Пятилетка] клиент запущен")

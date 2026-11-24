@@ -5,6 +5,9 @@ local Production = require("../src/shared/Sim/Production")
 local Recipes = require("../src/shared/Config/Recipes")
 local Grid = require("../src/shared/Sim/Grid")
 local GridConfig = require("../src/shared/Config/Grid")
+local BuildCommand = require("../src/shared/Sim/BuildCommand")
+local Buildings = require("../src/shared/Config/Buildings")
+local Text = require("../src/shared/Config/Text")
 
 local passed, failed = 0, 0
 
@@ -173,6 +176,77 @@ end)
 test("конфиг сетки корректный", function()
 	assert(GridConfig.cellSize > 0, "cellSize")
 	assert(GridConfig.regionCells > 0 and GridConfig.regionCells % 1 == 0, "regionCells")
+end)
+
+-- Команда стройки
+
+local testBuildings = {
+	hut = { sizeX = 2, sizeZ = 2, era = 0 },
+	tower = { sizeX = 1, sizeZ = 1, era = 2 },
+}
+
+test("правильная команда стройки разбирается", function()
+	local cmd, err = BuildCommand.parse(testBuildings, 0, "hut", 3, 4, 1)
+	eq(err, nil, "ошибка")
+	assert(cmd, "команда")
+	eq(cmd.typeId, "hut", "тип")
+	eq(cmd.x, 3, "x")
+	eq(cmd.rotation, 1, "поворот")
+end)
+
+test("мусор от клиента отклоняется", function()
+	local cases = {
+		{ 123, 0, 0, 0 },
+		{ "hut", 1.5, 0, 0 },
+		{ "hut", 0, "0", 0 },
+		{ "hut", 0, 0, 4 },
+		{ "hut", 0, 0, -1 },
+		{ "hut", 0 / 0, 0, 0 },
+		{ "hut", math.huge, 0, 0 },
+		{ "hut", 0, 0, nil },
+	}
+	for i, c in cases do
+		local cmd, err = BuildCommand.parse(testBuildings, 0, c[1], c[2], c[3], c[4])
+		eq(cmd, nil, `случай {i}`)
+		eq(err, "bad_args", `причина {i}`)
+	end
+end)
+
+test("неизвестное и закрытое здание не строится", function()
+	local _, err1 = BuildCommand.parse(testBuildings, 0, "castle", 0, 0, 0)
+	eq(err1, "unknown_building", "неизвестное")
+	local _, err2 = BuildCommand.parse(testBuildings, 0, "tower", 0, 0, 0)
+	eq(err2, "locked", "закрытое")
+	local cmd = BuildCommand.parse(testBuildings, 2, "tower", 0, 0, 0)
+	assert(cmd, "после открытия эпохи")
+end)
+
+test("конфиг зданий корректный", function()
+	for id, b in Buildings do
+		assert(b.sizeX >= 1 and b.sizeX % 1 == 0, `{id}: sizeX`)
+		assert(b.sizeZ >= 1 and b.sizeZ % 1 == 0, `{id}: sizeZ`)
+		assert(b.height > 0, `{id}: height`)
+		assert(#b.color == 3 and #b.roofColor == 3, `{id}: цвета`)
+		assert(b.name.ru ~= "" and b.name.en ~= "", `{id}: название`)
+		local recipe = Recipes[id]
+		if recipe then
+			eq(b.era, recipe.era, `{id}: эпоха совпадает с рецептом`)
+		end
+	end
+end)
+
+test("у всех ресурсов и статусов есть тексты", function()
+	for id, r in Recipes do
+		for res in r.outputs do
+			assert(Text.resources[res], `{id}: нет текста для {res}`)
+		end
+		for res in r.inputs do
+			assert(Text.resources[res], `{id}: нет текста для {res}`)
+		end
+	end
+	for _, status in { "working", "no_input", "output_full", "no_workers" } do
+		assert(Text.status[status], `нет текста статуса {status}`)
+	end
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)

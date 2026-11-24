@@ -8,6 +8,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local Grid = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Sim"):WaitForChild("Grid"))
+local GroundPick = require(script.Parent:WaitForChild("GroundPick"))
 
 local GridView = {}
 
@@ -70,21 +71,6 @@ local function makeLabel(): TextLabel
 	return label
 end
 
--- Точка пересечения луча из курсора с плоскостью земли или nil.
-local function groundPointUnderMouse(groundY: number): Vector3?
-	local camera = workspace.CurrentCamera
-	local mouse = UserInputService:GetMouseLocation()
-	local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
-	if math.abs(ray.Direction.Y) < 1e-6 then
-		return nil
-	end
-	local t = (groundY - ray.Origin.Y) / ray.Direction.Y
-	if t <= 0 then
-		return nil
-	end
-	return ray.Origin + ray.Direction * t
-end
-
 function GridView.start(grid: Grid.Grid, groundY: number)
 	local lines = makeLines(grid, groundY + 0.05)
 	lines.Parent = nil -- по умолчанию сетка скрыта
@@ -111,9 +97,7 @@ function GridView.start(grid: Grid.Grid, groundY: number)
 	end)
 
 	RunService.RenderStepped:Connect(function()
-		local usingMouse = UserInputService.MouseEnabled
-			and UserInputService:GetLastInputType() ~= Enum.UserInputType.Touch
-		local point = if usingMouse then groundPointUnderMouse(groundY) else nil
+		local point = if GroundPick.usingMouse() then GroundPick.fromMouse(groundY) else nil
 		local cell = if point then Grid.toCell(grid, point.X, point.Z) else nil
 		if cell then
 			local x, z = Grid.cellCenter(grid, cell.x, cell.z)
