@@ -4,6 +4,7 @@
 local World = require(script.Parent:WaitForChild("World"))
 local BuildingService = require(script.Parent:WaitForChild("BuildingService"))
 local RoadService = require(script.Parent:WaitForChild("RoadService"))
+local TruckService = require(script.Parent:WaitForChild("TruckService"))
 local Commands = require(script.Parent:WaitForChild("Commands"))
 
 local TICK_SECONDS = 1
@@ -11,6 +12,7 @@ local TICK_SECONDS = 1
 local region = World.build()
 BuildingService.start(region)
 RoadService.start(region)
+TruckService.start(region)
 Commands.start()
 print("[Пятилетка] сервер запущен")
 

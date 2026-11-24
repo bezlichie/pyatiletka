@@ -44,6 +44,16 @@ local Buildings: { [string]: Building } = {
 		era = 0,
 		order = 3,
 	},
+	depot = {
+		name = { ru = "Автопарк", en = "Truck depot" },
+		sizeX = 3,
+		sizeZ = 2,
+		height = 4,
+		color = { 150, 156, 162 },
+		roofColor = { 70, 90, 140 },
+		era = 0,
+		order = 4,
+	},
 }
 
 return Buildings
