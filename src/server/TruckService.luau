@@ -80,7 +80,8 @@ local function makePart(name: string, size: Vector3, color: Color3): Part
 	return part
 end
 
--- Модель грузовика: корпус (Root, якорный) и приваренные кабина и груз.
+-- Модель грузовика: корпус Root и детали на нём. Все детали якорные, без сварки:
+-- положение каждой задаётся смещением от корпуса (атрибут Offset), так и на клиенте.
 local function makeModel(id: string): (Model, BasePart)
 	local model = Instance.new("Model")
 	model.Name = id
@@ -88,20 +89,27 @@ local function makeModel(id: string): (Model, BasePart)
 	root.Anchored = true
 	root.Parent = model
 	local function attach(part: Part, offset: CFrame)
-		part.Anchored = false
+		part.Anchored = true
+		part:SetAttribute("Offset", offset)
 		part.CFrame = root.CFrame * offset
-		local weld = Instance.new("WeldConstraint")
-		weld.Part0 = root
-		weld.Part1 = part
-		weld.Parent = part
 		part.Parent = model
 	end
 	attach(makePart("Cab", Vector3.new(1.7, 0.9, 1.1), Color3.fromRGB(220, 220, 210)), CFrame.new(0, 1.2, -1))
+	-- Груз показывает клиент по атрибуту Cargo модели.
 	local cargo = makePart("Cargo", Vector3.new(1.6, 0.8, 1.8), Color3.fromRGB(150, 105, 60))
-	cargo.Transparency = 1
 	attach(cargo, CFrame.new(0, 1.2, 0.6))
 	model.PrimaryPart = root
 	return model, root
+end
+
+-- Ставит детали модели по их смещению от корпуса.
+local function placeParts(model: Model, rootCFrame: CFrame)
+	for _, child in model:GetChildren() do
+		local offset = child:GetAttribute("Offset")
+		if child:IsA("BasePart") and typeof(offset) == "CFrame" then
+			child.CFrame = rootCFrame * offset
+		end
+	end
 end
 
 -- Мировое положение и направление грузовика.
@@ -130,12 +138,9 @@ local function syncModel(entry: Entry)
 		cf = CFrame.new(cf.Position) * current.Rotation
 	end
 	entry.root.CFrame = cf
+	placeParts(entry.model, cf)
 	entry.model:SetAttribute("State", truck.state)
 	entry.model:SetAttribute("Cargo", truck.cargo)
-	local cargo = entry.model:FindFirstChild("Cargo") :: BasePart?
-	if cargo then
-		cargo.Transparency = if truck.cargo > 0 then 0 else 1
-	end
 end
 
 local function removeTruck(id: string)
