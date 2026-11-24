@@ -177,6 +177,7 @@ local function updateLabel(entry: Entry)
 		entry.model:SetAttribute("Status", state.status)
 	else
 		table.insert(lines, name)
+		entry.model:SetAttribute("Status", nil)
 	end
 	if entry.note then
 		table.insert(lines, entry.note)
