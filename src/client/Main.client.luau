@@ -10,6 +10,7 @@ local Grid = require(ReplicatedStorage.Shared:WaitForChild("Sim"):WaitForChild("
 local RtsCamera = require(script.Parent:WaitForChild("RtsCamera"))
 local GridView = require(script.Parent:WaitForChild("GridView"))
 local BuildMode = require(script.Parent:WaitForChild("BuildMode"))
+local TruckView = require(script.Parent:WaitForChild("TruckView"))
 
 -- Регион пока один, с центром в начале координат (так же строит землю сервер).
 local grid = Grid.new(GridConfig, 0, 0)
@@ -24,5 +25,6 @@ RtsCamera.start(CameraConfig, {
 })
 GridView.start(grid, GridConfig.groundHeight)
 BuildMode.start(grid, GridConfig.groundHeight)
+TruckView.start()
 
 print("[Пятилетка] клиент запущен")

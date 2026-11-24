@@ -31,6 +31,7 @@ type Entry = {
 	recipe: Production.Recipe?,
 	state: Production.State?,
 	label: TextLabel?,
+	note: string?, -- дополнительная строка таблички (например, у автопарка)
 }
 
 local grid = RegionState.grid
@@ -139,13 +140,20 @@ local function updateLabel(entry: Entry)
 	if state then
 		local status = Text.status[state.status]
 		table.insert(lines, `{name}: {if status then status.ru else state.status}`)
-		local stock = stockText(state.output)
-		if stock ~= "" then
-			table.insert(lines, stock)
+		local input = stockText(state.input)
+		local output = stockText(state.output)
+		if input ~= "" then
+			table.insert(lines, `{Text.labels.input.ru}: {input}`)
+		end
+		if output ~= "" then
+			table.insert(lines, `{Text.labels.output.ru}: {output}`)
 		end
 		entry.model:SetAttribute("Status", state.status)
 	else
 		table.insert(lines, name)
+	end
+	if entry.note then
+		table.insert(lines, entry.note)
 	end
 	if not entry.connected then
 		table.insert(lines, `<font color="#ff8a7a">{Text.status.no_road.ru}</font>`)
@@ -206,6 +214,67 @@ function BuildingService.remove(id: string): (boolean, string)
 	entry.model:Destroy()
 	entries[id] = nil
 	return true, id
+end
+
+-- Клетки дороги у края здания (пусто, если здания нет или подъезда нет).
+function BuildingService.entrances(id: string): { Roads.Cell }
+	local entry = entries[id]
+	if entry == nil then
+		return {}
+	end
+	local def = BuildingsConfig[entry.typeId]
+	local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, entry.rotation)
+	return Roads.entrances(roads, entry.x, entry.z, w, d)
+end
+
+-- Краткие сведения о здании для логистики или nil.
+function BuildingService.info(id: string): (string?, Production.Recipe?, Production.State?)
+	local entry = entries[id]
+	if entry == nil then
+		return nil, nil, nil
+	end
+	return entry.typeId, entry.recipe, entry.state
+end
+
+-- Все id зданий.
+function BuildingService.ids(): { string }
+	local result = {}
+	for id in entries do
+		table.insert(result, id)
+	end
+	return result
+end
+
+-- Забрать продукцию с выходного склада. Возвращает, сколько забрано.
+function BuildingService.take(id: string, resource: string, amount: number): number
+	local entry = entries[id]
+	if entry == nil or entry.state == nil then
+		return 0
+	end
+	local taken = Production.take(entry.state, resource, amount)
+	updateLabel(entry)
+	return taken
+end
+
+-- Привезти сырьё на входной склад. Возвращает, сколько принято.
+function BuildingService.deliver(id: string, resource: string, amount: number): number
+	local entry = entries[id]
+	if entry == nil or entry.recipe == nil or entry.state == nil then
+		return 0
+	end
+	local accepted = Production.deliver(entry.recipe, entry.state, resource, amount)
+	updateLabel(entry)
+	return accepted
+end
+
+-- Дополнительная строка на табличке здания (nil — убрать).
+function BuildingService.setNote(id: string, note: string?)
+	local entry = entries[id]
+	if entry == nil or entry.note == note then
+		return
+	end
+	entry.note = note
+	updateLabel(entry)
 end
 
 -- Пересчитать подъезды всех зданий. Вызывается после изменения дорог.

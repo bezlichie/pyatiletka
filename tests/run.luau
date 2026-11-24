@@ -10,6 +10,8 @@ local Buildings = require("../src/shared/Config/Buildings")
 local Text = require("../src/shared/Config/Text")
 local Roads = require("../src/shared/Sim/Roads")
 local RoadsConfig = require("../src/shared/Config/Roads")
+local Logistics = require("../src/shared/Sim/Logistics")
+local TrucksConfig = require("../src/shared/Config/Trucks")
 
 local passed, failed = 0, 0
 
@@ -347,6 +349,171 @@ test("команда дороги проверяет числа и длину", 
 	local _, err3 = BuildCommand.parseRoad(10, "0", 0, 1, 0)
 	eq(err3, "bad_args", "строка")
 	assert(RoadsConfig.maxCellsPerCommand >= 1, "конфиг дорог")
+end)
+
+-- Логистика
+
+local truckConfig = { capacity = 6, minLoad = 2, cellsPerSecond = 2, loadSeconds = 1, unloadSeconds = 1 }
+
+-- Тестовый мир: дорога по z = 0 от x = 0 до 20.
+-- Автопарк «depot» подъезд в x = 0, лесозаготовка «f» в x = 10, лесопилка «s» в x = 20.
+local function makeWorld()
+	local r = Roads.new(32)
+	roadLine(r, 0, 0, 20, 0)
+	local w = {
+		roads = r,
+		stock = { f = 10, s = 0 },
+		exists = { depot = true, f = true, s = true },
+		released = {},
+	}
+	local doors = { depot = { x = 0, z = 0 }, f = { x = 10, z = 0 }, s = { x = 20, z = 0 } }
+	w.api = {
+		findPath = function(from, to)
+			return Roads.findPath(r, from, to)
+		end,
+		entrances = function(id)
+			if not w.exists[id] then
+				return {}
+			end
+			return { doors[id] }
+		end,
+		isRoad = function(c)
+			return Roads.has(r, c.x, c.z)
+		end,
+		take = function(id, _res, amount)
+			local n = math.min(w.stock[id], amount)
+			w.stock[id] -= n
+			return n
+		end,
+		deliver = function(id, _res, amount)
+			w.stock[id] += amount
+			return amount
+		end,
+		release = function(job, side)
+			table.insert(w.released, side)
+		end,
+	}
+	return w
+end
+
+local function runTruck(t, w, seconds)
+	for _ = 1, seconds * 4 do
+		Logistics.step(t, 0.25, truckConfig, w.api)
+	end
+end
+
+test("заказы: полный склад первым, мелочь не возим", function()
+	local jobs = Logistics.candidates({
+		{ id = "a", resource = "logs", amount = 1, full = false },
+		{ id = "b", resource = "logs", amount = 4, full = false },
+		{ id = "c", resource = "logs", amount = 2, full = true },
+		{ id = "d", resource = "grain", amount = 9, full = false },
+	}, { { id = "s", resource = "logs", amount = 5 } }, truckConfig)
+	eq(#jobs, 2, "заказов")
+	eq(jobs[1].from, "c", "полный первым")
+	eq(jobs[2].from, "b", "потом по объёму")
+	eq(jobs[2].amount, 4, "объём")
+	local big = Logistics.candidates(
+		{ { id = "b", resource = "logs", amount = 50, full = true } },
+		{ { id = "s", resource = "logs", amount = 40 } },
+		truckConfig
+	)
+	eq(big[1].amount, 6, "не больше вместимости")
+end)
+
+test(
+	"грузовик везёт брёвна от лесозаготовки на лесопилку",
+	function()
+		local w = makeWorld()
+		local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+		local job = Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+		assert(job, "заказ выдан")
+		eq(t.state, "to_pickup", "едет за грузом")
+		runTruck(t, w, 5) -- 10 клеток по 2 в секунду
+		eq(t.state, "loading", "грузится")
+		runTruck(t, w, 1)
+		eq(t.state, "to_dropoff", "везёт")
+		eq(t.cargo, 6, "в кузове")
+		eq(w.stock.f, 4, "у лесозаготовки осталось")
+		runTruck(t, w, 5)
+		runTruck(t, w, 1)
+		eq(t.state, "idle", "свободен")
+		eq(w.stock.s, 6, "привезено")
+		eq(#w.released, 2, "резервы сняты")
+		Logistics.sendHome(t, w.api)
+		eq(t.state, "returning", "едет домой")
+		runTruck(t, w, 10)
+		eq(t.state, "idle", "дома")
+		eq(t.cell.x, 0, "у автопарка")
+	end
+)
+
+test("положение грузовика плавно между клетками", function()
+	local w = makeWorld()
+	local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+	Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+	Logistics.step(t, 0.25, truckConfig, w.api) -- полклетки
+	local x, z = Logistics.position(t)
+	eq(x, 0.5, "x")
+	eq(z, 0, "z")
+end)
+
+test("без дороги до получателя заказ не выдаётся", function()
+	local w = makeWorld()
+	Roads.remove(w.roads, 15, 0)
+	local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+	eq(
+		Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api),
+		nil,
+		"заказ"
+	)
+	eq(t.state, "idle", "стоит")
+end)
+
+test(
+	"снос дороги или здания в пути срывает заказ и снимает резервы",
+	function()
+		local w = makeWorld()
+		local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+		Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+		runTruck(t, w, 1)
+		Roads.remove(w.roads, 5, 0)
+		runTruck(t, w, 2)
+		eq(t.state, "idle", "заказ сорван")
+		eq(#w.released, 2, "оба резерва сняты")
+
+		local w2 = makeWorld()
+		local t2 = Logistics.newTruck("t2", "depot", { x = 0, z = 0 })
+		Logistics.dispatch(t2, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w2.api)
+		runTruck(t2, w2, 6)
+		eq(t2.state, "to_dropoff", "везёт")
+		w2.exists.s = false
+		runTruck(t2, w2, 6)
+		eq(t2.state, "idle", "получателя нет")
+		eq(t2.cargo, 0, "груз пропал")
+	end
+)
+
+test("объезд: снесли участок, но есть другая дорога", function()
+	local w = makeWorld()
+	roadLine(w.roads, 4, 0, 4, 2)
+	roadLine(w.roads, 4, 2, 8, 2)
+	roadLine(w.roads, 8, 2, 8, 0)
+	local t = Logistics.newTruck("t1", "depot", { x = 0, z = 0 })
+	Logistics.dispatch(t, { { from = "f", to = "s", resource = "logs", amount = 6 } }, w.api)
+	runTruck(t, w, 1)
+	Roads.remove(w.roads, 6, 0)
+	runTruck(t, w, 10)
+	assert(
+		t.state == "loading" or t.state == "to_dropoff",
+		`доехал в объезд, состояние {t.state}`
+	)
+end)
+
+test("конфиг грузовиков корректный", function()
+	assert(TrucksConfig.perDepot >= 1, "perDepot")
+	assert(TrucksConfig.capacity >= TrucksConfig.minLoad, "capacity")
+	assert(TrucksConfig.cellsPerSecond > 0, "скорость")
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)

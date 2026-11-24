@@ -37,6 +37,13 @@ return {
 		too_long = { ru = "Слишком длинная дорога", en = "Road is too long" },
 	} :: { [string]: Text },
 
+	labels = {
+		input = { ru = "сырьё", en = "input" },
+		output = { ru = "склад", en = "stock" },
+		trucks = { ru = "грузовиков", en = "trucks" },
+		trucksFree = { ru = "свободно", en = "free" },
+	} :: { [string]: Text },
+
 	buildMode = {
 		demolish = { ru = "Снос", en = "Demolish" },
 		road = { ru = "Дорога", en = "Road" },
