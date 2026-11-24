@@ -13,6 +13,8 @@ local RoadsConfig = require("../src/shared/Config/Roads")
 local Logistics = require("../src/shared/Sim/Logistics")
 local TrucksConfig = require("../src/shared/Config/Trucks")
 local Construction = require("../src/shared/Sim/Construction")
+local RegionSave = require("../src/shared/Sim/RegionSave")
+local SaveConfig = require("../src/shared/Config/Save")
 
 local passed, failed = 0, 0
 
@@ -644,6 +646,90 @@ test("цепочка: доски с лесопилки едут на строй�
 	eq(#jobs, 1, "заказ")
 	eq(jobs[1].to, "house", "куда")
 	eq(jobs[1].amount, 3, "сколько")
+end)
+
+-- Сохранение
+
+test("снимок региона проходит проверку и чистит мусор", function()
+	local raw = {
+		version = RegionSave.VERSION,
+		savedAt = 100,
+		buildings = {
+			{
+				typeId = "forestry",
+				x = 5,
+				z = 6,
+				rotation = 1,
+				production = { running = true, progress = 2, input = {}, output = { logs = 3, bad = "x" } },
+			},
+			{
+				typeId = "house",
+				x = 10,
+				z = 10,
+				rotation = 0,
+				construction = { delivered = { boards = 4 }, progress = 0 },
+			},
+			{ typeId = "castle", x = 1, z = 1, rotation = 0 },
+			{ typeId = "sawmill", x = 1.5, z = 1, rotation = 0 },
+			{ typeId = "sawmill", x = 1, z = 1, rotation = 7 },
+			"мусор",
+		},
+		roads = { 1, 2, 3, 4, 5.5, 6, 7 },
+	}
+	local snap = RegionSave.sanitize(raw, Buildings)
+	assert(snap, "снимок")
+	eq(#snap.buildings, 2, "годных зданий")
+	local f = snap.buildings[1]
+	assert(f.production, "производство")
+	eq(f.production.output.logs, 3, "брёвна")
+	eq(f.production.output.bad, nil, "мусор в складе")
+	local h = snap.buildings[2]
+	assert(h.construction, "стройка")
+	eq(h.construction.delivered.boards, 4, "доски на стройке")
+	eq(#snap.roads, 4, "годные клетки дорог (пары)")
+	eq(RegionSave.sanitize({ version = 999 }, Buildings), nil, "чужая версия")
+	eq(RegionSave.sanitize("строка", Buildings), nil, "не таблица")
+end)
+
+test(
+	"блокировка сессии: чужой свежий регион не открыть, брошенный — можно",
+	function()
+		local timeout = 300
+		local rec = RegionSave.acquire(nil, "A", 1000, timeout)
+		assert(rec and rec.lock, "первый сервер взял")
+		eq(rec.lock.session, "A", "чья блокировка")
+		eq(RegionSave.acquire(rec, "B", 1100, timeout), nil, "второй сервер не может")
+		assert(RegionSave.acquire(rec, "A", 1100, timeout), "свой можно продлить")
+		assert(
+			RegionSave.acquire(rec, "B", 1000 + timeout + 1, timeout),
+			"брошенный можно забрать"
+		)
+	end
+)
+
+test(
+	"сохранение: чужая свежая блокировка не даёт писать, выход снимает свою",
+	function()
+		local timeout = 300
+		local snap = RegionSave.emptySnapshot(0)
+		local rec = RegionSave.acquire(nil, "A", 1000, timeout)
+		eq(RegionSave.store(rec, "B", 1010, timeout, snap, false), nil, "B не пишет поверх A")
+		local saved = RegionSave.store(rec, "A", 1010, timeout, snap, false)
+		assert(saved and saved.lock and saved.region, "A сохранил и держит")
+		eq(saved.lock.time, 1010, "блокировка продлена")
+		local released = RegionSave.store(saved, "A", 1020, timeout, snap, true)
+		assert(released, "запись")
+		eq(released.lock, nil, "блокировка снята")
+		assert(RegionSave.acquire(released, "B", 1021, timeout), "теперь B может открыть")
+	end
+)
+
+test("конфиг сохранения корректный", function()
+	assert(
+		SaveConfig.autosaveSeconds < SaveConfig.lockTimeoutSeconds,
+		"автосохранение чаще срока блокировки"
+	)
+	assert(#SaveConfig.dataStoreName > 0, "имя хранилища")
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)
