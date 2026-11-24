@@ -1,0 +1,17 @@
+# Сборки Rojo
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+*.rbxm
+*.rbxmx
+sourcemap.json
+
+# Пакеты Wally
+Packages/
+ServerPackages/
+DevPackages/
+
+# Системные файлы
+.DS_Store
+Thumbs.db
