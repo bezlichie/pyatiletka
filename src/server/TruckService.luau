@@ -190,26 +190,16 @@ end
 local function collectOrders(): ({ Logistics.Offer }, { Logistics.Demand })
 	local offers, demands = {}, {}
 	for _, id in BuildingService.ids() do
-		local _, recipe, state = BuildingService.info(id)
-		if recipe and state then
-			for resource in recipe.outputs do
-				local free = (state.output[resource] or 0) - reserved(reservedOut, id, resource)
-				if free > 0 then
-					table.insert(offers, {
-						id = id,
-						resource = resource,
-						amount = free,
-						full = state.status == "output_full",
-					})
-				end
+		for _, offer in BuildingService.offers(id) do
+			local free = offer.amount - reserved(reservedOut, id, offer.resource)
+			if free > 0 then
+				table.insert(offers, { id = id, resource = offer.resource, amount = free, full = offer.full })
 			end
-			for resource in recipe.inputs do
-				local space = recipe.storage
-					- (state.input[resource] or 0)
-					- reserved(reservedIn, id, resource)
-				if space > 0 then
-					table.insert(demands, { id = id, resource = resource, amount = space })
-				end
+		end
+		for _, demand in BuildingService.demands(id) do
+			local space = demand.amount - reserved(reservedIn, id, demand.resource)
+			if space > 0 then
+				table.insert(demands, { id = id, resource = demand.resource, amount = space })
 			end
 		end
 	end

@@ -11,6 +11,10 @@ export type Building = {
 	roofColor: { number },
 	era: number, -- с какой эпохи доступно
 	order: number, -- порядок кнопок на панели стройки
+	-- Материалы для стройки. Без cost здание появляется сразу (стартовые здания,
+	-- иначе первую лесопилку не из чего построить).
+	cost: { [string]: number }?,
+	buildSeconds: number?, -- сколько строится после доставки всех материалов
 }
 
 local Buildings: { [string]: Building } = {
@@ -43,6 +47,8 @@ local Buildings: { [string]: Building } = {
 		roofColor = { 150, 60, 50 },
 		era = 0,
 		order = 3,
+		cost = { boards = 8 },
+		buildSeconds = 10,
 	},
 	depot = {
 		name = { ru = "Автопарк", en = "Truck depot" },

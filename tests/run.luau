@@ -12,6 +12,7 @@ local Roads = require("../src/shared/Sim/Roads")
 local RoadsConfig = require("../src/shared/Config/Roads")
 local Logistics = require("../src/shared/Sim/Logistics")
 local TrucksConfig = require("../src/shared/Config/Trucks")
+local Construction = require("../src/shared/Sim/Construction")
 
 local passed, failed = 0, 0
 
@@ -514,6 +515,64 @@ test("конфиг грузовиков корректный", function()
 	assert(TrucksConfig.perDepot >= 1, "perDepot")
 	assert(TrucksConfig.capacity >= TrucksConfig.minLoad, "capacity")
 	assert(TrucksConfig.cellsPerSecond > 0, "скорость")
+end)
+
+-- Стройка
+
+test(
+	"стройплощадка принимает только нужное и не больше нормы",
+	function()
+		local site = Construction.new({ boards = 8 }, 10)
+		eq(Construction.deliver(site, "boards", 6), 6, "первая партия")
+		eq(Construction.deliver(site, "logs", 5), 0, "чужой материал")
+		eq(Construction.deliver(site, "boards", 6), 2, "только остаток")
+		eq(Construction.remaining(site, "boards"), 0, "остаток")
+		eq(Construction.hasAllMaterials(site), true, "всё привезено")
+	end
+)
+
+test("стройка идёт только когда все материалы на месте", function()
+	local site = Construction.new({ boards = 4, logs = 2 }, 5)
+	Construction.deliver(site, "boards", 4)
+	eq(Construction.tick(site, 10), false, "без брёвен не строится")
+	eq(site.progress, 0, "прогресс стоит")
+	Construction.deliver(site, "logs", 2)
+	eq(Construction.tick(site, 3), false, "строится")
+	eq(Construction.tick(site, 3), true, "достроено")
+	eq(Construction.deliver(site, "boards", 1), 0, "после стройки не принимает")
+end)
+
+test(
+	"у зданий со стройкой корректная цена и тексты материалов",
+	function()
+		local any = false
+		for id, b in Buildings do
+			if b.cost then
+				any = true
+				assert(b.buildSeconds and b.buildSeconds >= 0, `{id}: buildSeconds`)
+				for res, n in b.cost do
+					assert(n > 0 and n % 1 == 0, `{id}: цена {res}`)
+					assert(Text.resources[res], `{id}: нет текста для {res}`)
+				end
+			end
+		end
+		assert(any, "хотя бы одно здание строится из материалов")
+		assert(
+			Buildings.forestry.cost == nil and Buildings.sawmill.cost == nil,
+			"стартовая цепочка бесплатна"
+		)
+	end
+)
+
+test("цепочка: доски с лесопилки едут на стройку дома", function()
+	local jobs = Logistics.candidates(
+		{ { id = "saw", resource = "boards", amount = 3, full = false } },
+		{ { id = "house", resource = "boards", amount = 8 } },
+		truckConfig
+	)
+	eq(#jobs, 1, "заказ")
+	eq(jobs[1].to, "house", "куда")
+	eq(jobs[1].amount, 3, "сколько")
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)

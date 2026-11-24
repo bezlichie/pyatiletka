@@ -41,6 +41,10 @@ return {
 		input = { ru = "сырьё", en = "input" },
 		output = { ru = "склад", en = "stock" },
 		trucks = { ru = "грузовиков", en = "trucks" },
+		construction = { ru = "стройка", en = "construction" },
+		waitingMaterials = { ru = "ждёт материалы", en = "waiting for materials" },
+		building = { ru = "строится", en = "building" },
+		built = { ru = "построен", en = "built" },
 		trucksFree = { ru = "свободно", en = "free" },
 	} :: { [string]: Text },
 
