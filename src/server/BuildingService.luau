@@ -176,7 +176,9 @@ local function place(player: Player, typeId: any, x: any, z: any, rotation: any)
 	end
 	model.Parent = folder
 	entries[id] = entry
-	print(`[Пятилетка] {player.Name} построил {def.name.ru} ({id}) в клетке {command.x}, {command.z}`)
+	print(
+		`[Пятилетка] {player.Name} построил {def.name.ru} ({id}) в клетке {command.x}, {command.z}`
+	)
 	return true, id
 end
 

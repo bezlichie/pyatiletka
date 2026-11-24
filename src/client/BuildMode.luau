@@ -84,7 +84,10 @@ function BuildMode.start(grid: Grid.Grid, groundY: number)
 	-- Зеркало занятости клеток: чтобы призрак сразу краснел над занятым местом.
 	local function track(child: Instance)
 		local typeId, x, z, rotation =
-			child:GetAttribute("TypeId"), child:GetAttribute("CellX"), child:GetAttribute("CellZ"), child:GetAttribute("Rotation")
+			child:GetAttribute("TypeId"),
+			child:GetAttribute("CellX"),
+			child:GetAttribute("CellZ"),
+			child:GetAttribute("Rotation")
 		local def = if type(typeId) == "string" then BuildingsConfig[typeId] else nil
 		if def and type(x) == "number" and type(z) == "number" and type(rotation) == "number" then
 			Grid.place(grid, child.Name, x, z, def.sizeX, def.sizeZ, rotation)
@@ -216,7 +219,9 @@ function BuildMode.start(grid: Grid.Grid, groundY: number)
 			else Color3.fromRGB(35, 38, 42)
 		hintFrame.Visible = mode ~= "none"
 		if mode == "place" then
-			hint.Text = if GroundPick.usingMouse() then Text.buildMode.placeHint.ru else Text.buildMode.placeHintTouch.ru
+			hint.Text = if GroundPick.usingMouse()
+				then Text.buildMode.placeHint.ru
+				else Text.buildMode.placeHintTouch.ru
 		elseif mode == "demolish" then
 			hint.Text = Text.buildMode.demolishHint.ru
 		end
@@ -316,7 +321,9 @@ function BuildMode.start(grid: Grid.Grid, groundY: number)
 
 	local function buildingAt(screenX: number, screenY: number, viewport: boolean): Model?
 		local camera = workspace.CurrentCamera
-		local ray = if viewport then camera:ViewportPointToRay(screenX, screenY) else camera:ScreenPointToRay(screenX, screenY)
+		local ray = if viewport
+			then camera:ViewportPointToRay(screenX, screenY)
+			else camera:ScreenPointToRay(screenX, screenY)
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Include
 		params.FilterDescendantsInstances = { buildingsFolder }
