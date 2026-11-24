@@ -273,27 +273,33 @@ test("линия дороги идёт буквой «Г» без повторо
 	eq(#Roads.linePath(0, 4, 0, 0), 5, "назад по Z")
 end)
 
-test("дороги добавляются, удаляются и не выходят за край", function()
-	local r = Roads.new(10)
-	eq(Roads.add(r, 1, 1), true, "добавлена")
-	eq(Roads.add(r, 1, 1), false, "повтор")
-	eq(Roads.add(r, 10, 0), false, "за краем")
-	eq(r.count, 1, "число")
-	eq(Roads.remove(r, 1, 1), true, "удалена")
-	eq(Roads.has(r, 1, 1), false, "нет дороги")
-	eq(r.count, 0, "число после удаления")
-end)
+test(
+	"дороги добавляются, удаляются и не выходят за край",
+	function()
+		local r = Roads.new(10)
+		eq(Roads.add(r, 1, 1), true, "добавлена")
+		eq(Roads.add(r, 1, 1), false, "повтор")
+		eq(Roads.add(r, 10, 0), false, "за краем")
+		eq(r.count, 1, "число")
+		eq(Roads.remove(r, 1, 1), true, "удалена")
+		eq(Roads.has(r, 1, 1), false, "нет дороги")
+		eq(r.count, 0, "число после удаления")
+	end
+)
 
-test("подъезд к зданию — дорога у края, но не по диагонали", function()
-	local r = Roads.new(20)
-	-- здание 3×2 с углом в (5, 5) занимает x 5..7, z 5..6
-	Roads.add(r, 4, 4) -- диагональ, не считается
-	eq(#Roads.entrances(r, 5, 5, 3, 2), 0, "только диагональ")
-	Roads.add(r, 8, 6) -- справа от края
-	local e = Roads.entrances(r, 5, 5, 3, 2)
-	eq(#e, 1, "один подъезд")
-	eq(e[1].x, 8, "x подъезда")
-end)
+test(
+	"подъезд к зданию — дорога у края, но не по диагонали",
+	function()
+		local r = Roads.new(20)
+		-- здание 3×2 с углом в (5, 5) занимает x 5..7, z 5..6
+		Roads.add(r, 4, 4) -- диагональ, не считается
+		eq(#Roads.entrances(r, 5, 5, 3, 2), 0, "только диагональ")
+		Roads.add(r, 8, 6) -- справа от края
+		local e = Roads.entrances(r, 5, 5, 3, 2)
+		eq(#e, 1, "один подъезд")
+		eq(e[1].x, 8, "x подъезда")
+	end
+)
 
 test("поиск пути по дорогам находит кратчайший путь", function()
 	local r = Roads.new(20)
@@ -320,7 +326,10 @@ test("без связи пути нет, разрыв дороги рвёт пу
 	roadLine(r, 8, 0, 12, 0)
 	eq(Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }), nil, "разрыв")
 	roadLine(r, 5, 0, 8, 0)
-	assert(Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }), "после стройки есть")
+	assert(
+		Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }),
+		"после стройки есть"
+	)
 	Roads.remove(r, 6, 0)
 	eq(Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }), nil, "после сноса нет")
 	local same = Roads.findPath(r, { { x = 1, z = 0 } }, { { x = 1, z = 0 } })

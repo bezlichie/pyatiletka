@@ -266,7 +266,9 @@ function BuildMode.start(grid: Grid.Grid, groundY: number)
 				then Text.buildMode.placeHint.ru
 				else Text.buildMode.placeHintTouch.ru
 		elseif mode == "road" then
-			hint.Text = if GroundPick.usingMouse() then Text.buildMode.roadHint.ru else Text.buildMode.roadHintTouch.ru
+			hint.Text = if GroundPick.usingMouse()
+				then Text.buildMode.roadHint.ru
+				else Text.buildMode.roadHintTouch.ru
 		elseif mode == "demolish" then
 			hint.Text = Text.buildMode.demolishHint.ru
 		end

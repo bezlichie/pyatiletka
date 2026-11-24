@@ -45,7 +45,13 @@ end
 
 -- Команда «проложить дорогу» от (x1, z1) до (x2, z2) буквой «Г».
 -- maxCells — сколько клеток можно проложить за раз.
-function BuildCommand.parseRoad(maxCells: number, x1: any, z1: any, x2: any, z2: any): (RoadCommand?, CommandError?)
+function BuildCommand.parseRoad(
+	maxCells: number,
+	x1: any,
+	z1: any,
+	x2: any,
+	z2: any
+): (RoadCommand?, CommandError?)
 	if not isInteger(x1) or not isInteger(z1) or not isInteger(x2) or not isInteger(z2) then
 		return nil, "bad_args"
 	end

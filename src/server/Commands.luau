@@ -43,7 +43,9 @@ local function placeBuilding(player: Player, typeId: any, x: any, z: any, rotati
 	end
 	local ok, result = BuildingService.place(command.typeId, command.x, command.z, command.rotation)
 	if ok then
-		print(`[Пятилетка] {player.Name}: {BuildingsConfig[command.typeId].name.ru} ({result}) в {command.x}, {command.z}`)
+		print(
+			`[Пятилетка] {player.Name}: {BuildingsConfig[command.typeId].name.ru} ({result}) в {command.x}, {command.z}`
+		)
 	end
 	return ok, result
 end
@@ -58,7 +60,9 @@ local function placeRoad(player: Player, x1: any, z1: any, x2: any, z2: any): (b
 	end
 	local ok, result = RoadService.placeLine(command.x1, command.z1, command.x2, command.z2)
 	if ok then
-		print(`[Пятилетка] {player.Name}: дорога {command.x1},{command.z1} → {command.x2},{command.z2}, новых клеток {result}`)
+		print(
+			`[Пятилетка] {player.Name}: дорога {command.x1},{command.z1} → {command.x2},{command.z2}, новых клеток {result}`
+		)
 	end
 	return ok, result
 end
