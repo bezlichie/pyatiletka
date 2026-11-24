@@ -21,6 +21,12 @@ function World.build()
 		baseplate:Destroy()
 	end
 
+	-- При StreamingEnabled без персонажа клиенту ничего не стримится, поэтому землю
+	-- кладём в Persistent-модель: она приходит клиенту целиком при входе.
+	local region = Instance.new("Model")
+	region.Name = "Region"
+	region.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+
 	local side = GridConfig.regionCells * GridConfig.cellSize
 	local ground = Instance.new("Part")
 	ground.Name = "RegionGround"
@@ -30,7 +36,8 @@ function World.build()
 	ground.Material = Enum.Material.Grass
 	ground.Color = Color3.fromRGB(106, 138, 76)
 	ground.TopSurface = Enum.SurfaceType.Smooth
-	ground.Parent = workspace
+	ground.Parent = region
+	region.Parent = workspace
 end
 
 return World
