@@ -59,6 +59,25 @@ local world: Logistics.World = {
 	end,
 	take = BuildingService.take,
 	deliver = BuildingService.deliver,
+	claimDemand = function(resource, amount)
+		local bestId, bestSpace = nil, 0
+		for _, id in BuildingService.ids() do
+			for _, demand in BuildingService.demands(id) do
+				if demand.resource == resource then
+					local space = demand.amount - reserved(reservedIn, id, resource)
+					if space > bestSpace then
+						bestId, bestSpace = id, space
+					end
+				end
+			end
+		end
+		if bestId == nil then
+			return nil, 0
+		end
+		local claimed = math.min(amount, bestSpace)
+		reserve(reservedIn, bestId, resource, claimed)
+		return bestId, claimed
+	end,
 	release = function(job, side)
 		if side == "out" then
 			reserve(reservedOut, job.from, job.resource, -job.amount)
@@ -233,7 +252,10 @@ local function step(dt: number)
 				truck.cell = doors[1]
 			end
 		end
-		if truck.state == "idle" then
+		if truck.state == "idle" and truck.cargo > 0 then
+			-- Груз остался в кузове (получателя снесли): ищем, куда его отвезти.
+			Logistics.redirect(truck, world)
+		elseif truck.state == "idle" then
 			-- Заказы пересчитываем для каждого грузовика: предыдущий мог занять резерв.
 			local offers, demands = collectOrders()
 			local job = Logistics.dispatch(truck, Logistics.candidates(offers, demands, TrucksConfig), world)
