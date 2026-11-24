@@ -90,6 +90,35 @@ function RoadService.remove(id: string): (boolean, string)
 	return true, id
 end
 
+-- Все клетки дорог плоским списком x1, z1, x2, z2, ... для сохранения.
+function RoadService.snapshot(): { number }
+	local result = {}
+	for _, part in parts do
+		table.insert(result, part:GetAttribute("CellX") :: number)
+		table.insert(result, part:GetAttribute("CellZ") :: number)
+	end
+	return result
+end
+
+-- Восстановить дороги из сохранения. Занятые клетки пропускаются. Возвращает число клеток.
+function RoadService.restore(flat: { number }): number
+	local count = 0
+	for i = 1, #flat - 1, 2 do
+		local x, z = flat[i], flat[i + 1]
+		if not Roads.has(roads, x, z) and Grid.canPlace(grid, x, z, 1, 1, 0) then
+			local id = roadId(x, z)
+			Grid.place(grid, id, x, z, 1, 1, 0)
+			Roads.add(roads, x, z)
+			local part = makePart(x, z)
+			part.Parent = folder
+			parts[id] = part
+			count += 1
+		end
+	end
+	BuildingService.refreshConnections()
+	return count
+end
+
 function RoadService.start(region: Model)
 	folder = Instance.new("Folder")
 	folder.Name = "Roads"

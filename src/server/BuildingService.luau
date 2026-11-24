@@ -16,6 +16,7 @@ local Roads = require(Sim:WaitForChild("Roads"))
 local Production = require(Sim:WaitForChild("Production"))
 local Construction = require(Sim:WaitForChild("Construction"))
 local RegionState = require(script.Parent:WaitForChild("RegionState"))
+local RegionSave = require(Sim:WaitForChild("RegionSave"))
 
 local BuildingService = {}
 
@@ -211,7 +212,14 @@ local function setSiteLook(model: Model, isSite: boolean)
 end
 
 -- Ставит здание. Возвращает true и id или false и код ошибки.
-function BuildingService.place(typeId: string, x: number, z: number, rotation: number): (boolean, string)
+-- asSite: здание с ценой ставится стройплощадкой (при загрузке сохранения — как было).
+local function create(
+	typeId: string,
+	x: number,
+	z: number,
+	rotation: number,
+	asSite: boolean
+): (boolean, string)
 	local def = BuildingsConfig[typeId]
 	local id = `b{nextId}`
 	local ok, placeErr = Grid.place(grid, id, x, z, def.sizeX, def.sizeZ, rotation)
@@ -236,7 +244,7 @@ function BuildingService.place(typeId: string, x: number, z: number, rotation: n
 		entry.recipe = recipe
 		entry.state = Production.new()
 	end
-	if def.cost then
+	if def.cost and asSite then
 		entry.construction = Construction.new(def.cost, def.buildSeconds or 0)
 		setSiteLook(model, true)
 	end
@@ -244,6 +252,69 @@ function BuildingService.place(typeId: string, x: number, z: number, rotation: n
 	model.Parent = folder
 	entries[id] = entry
 	return true, id
+end
+
+function BuildingService.place(typeId: string, x: number, z: number, rotation: number): (boolean, string)
+	return create(typeId, x, z, rotation, true)
+end
+
+-- Состояние всех зданий для сохранения.
+function BuildingService.snapshot(): { RegionSave.BuildingSave }
+	local result = {}
+	for _, entry in entries do
+		local save: RegionSave.BuildingSave =
+			{ typeId = entry.typeId, x = entry.x, z = entry.z, rotation = entry.rotation }
+		local state = entry.state
+		if state then
+			save.production = {
+				running = state.running,
+				progress = state.progress,
+				input = table.clone(state.input),
+				output = table.clone(state.output),
+			}
+		end
+		local site = entry.construction
+		if site then
+			save.construction = { delivered = table.clone(site.delivered), progress = site.progress }
+		end
+		table.insert(result, save)
+	end
+	return result
+end
+
+-- Восстановить здание из сохранения. Возвращает false, если место занято.
+function BuildingService.restore(save: RegionSave.BuildingSave): boolean
+	local ok, id = create(save.typeId, save.x, save.z, save.rotation, save.construction ~= nil)
+	if not ok then
+		return false
+	end
+	local entry = entries[id]
+	local p = save.production
+	if p and entry.state and entry.recipe then
+		local state = entry.state
+		state.running = p.running
+		state.progress = math.min(p.progress, entry.recipe.cycleSeconds)
+		for resource, amount in p.input do
+			if entry.recipe.inputs[resource] then
+				state.input[resource] = math.min(amount, entry.recipe.storage)
+			end
+		end
+		for resource, amount in p.output do
+			if entry.recipe.outputs[resource] then
+				state.output[resource] = math.min(amount, entry.recipe.storage)
+			end
+		end
+	end
+	local c = save.construction
+	local site = entry.construction
+	if c and site then
+		for resource, amount in c.delivered do
+			Construction.deliver(site, resource, amount)
+		end
+		site.progress = math.min(c.progress, site.buildSeconds)
+	end
+	updateLabel(entry)
+	return true
 end
 
 function BuildingService.has(id: string): boolean
