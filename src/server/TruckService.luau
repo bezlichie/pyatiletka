@@ -13,6 +13,7 @@ local TrucksConfig = require(Config:WaitForChild("Trucks"))
 local Text = require(Config:WaitForChild("Text"))
 local Roads = require(Shared:WaitForChild("Sim"):WaitForChild("Roads"))
 local Logistics = require(Shared:WaitForChild("Sim"):WaitForChild("Logistics"))
+local TruckModel = require(Shared:WaitForChild("Visual"):WaitForChild("TruckModel"))
 local RegionState = require(script.Parent:WaitForChild("RegionState"))
 local BuildingService = require(script.Parent:WaitForChild("BuildingService"))
 
@@ -20,11 +21,16 @@ local TruckService = {}
 
 -- Как часто считаем грузовики. Чаще общего тика, чтобы клиенту было что сглаживать.
 local STEP_SECONDS = 0.2
-local TRUCK_SIZE = Vector3.new(1.8, 1.6, 3.2)
 local DEPOT_TYPE = "depot"
 
--- shownState и shownCargo — что уже записано в атрибуты модели.
-type Entry = { truck: Logistics.Truck, model: Model, root: BasePart, shownState: string?, shownCargo: number? }
+-- shown* — что уже записано в атрибуты модели (чтобы не писать то же самое).
+type Entry = {
+	truck: Logistics.Truck,
+	model: Model,
+	shownCFrame: CFrame?,
+	shownState: string?,
+	shownCargo: number?,
+}
 
 local grid = RegionState.grid
 local roads = RegionState.roads
@@ -53,48 +59,13 @@ local fleet = Logistics.newFleet({
 	deliver = BuildingService.deliver,
 })
 
-local function makePart(name: string, size: Vector3, color: Color3): Part
-	local part = Instance.new("Part")
-	part.Name = name
-	part.Size = size
-	part.Color = color
-	part.Material = Enum.Material.SmoothPlastic
-	part.CanCollide = false
-	part.CanQuery = false -- не мешает кликам по зданиям и дорогам
-	part.CanTouch = false
-	return part
-end
-
--- Модель грузовика: корпус Root и детали на нём. Все детали якорные, без сварки:
--- положение каждой задаётся смещением от корпуса (атрибут Offset), так и на клиенте.
-local function makeModel(id: string): (Model, BasePart)
+-- Грузовик на сервере — пустая модель с атрибутами: CFrame (положение), State, Cargo.
+-- Детали не создаются и не двигаются: модель строит и плавно ведёт клиент (client/TruckView).
+-- Так на каждый шаг приходится одна запись атрибута, а не перестановка трёх деталей.
+local function makeModel(id: string): Model
 	local model = Instance.new("Model")
 	model.Name = id
-	local root = makePart("Root", TRUCK_SIZE, Color3.fromRGB(70, 110, 160))
-	root.Anchored = true
-	root.Parent = model
-	local function attach(part: Part, offset: CFrame)
-		part.Anchored = true
-		part:SetAttribute("Offset", offset)
-		part.CFrame = root.CFrame * offset
-		part.Parent = model
-	end
-	attach(makePart("Cab", Vector3.new(1.7, 0.9, 1.1), Color3.fromRGB(220, 220, 210)), CFrame.new(0, 1.2, -1))
-	-- Груз показывает клиент по атрибуту Cargo модели.
-	local cargo = makePart("Cargo", Vector3.new(1.6, 0.8, 1.8), Color3.fromRGB(150, 105, 60))
-	attach(cargo, CFrame.new(0, 1.2, 0.6))
-	model.PrimaryPart = root
-	return model, root
-end
-
--- Ставит детали модели по их смещению от корпуса.
-local function placeParts(model: Model, rootCFrame: CFrame)
-	for _, child in model:GetChildren() do
-		local offset = child:GetAttribute("Offset")
-		if child:IsA("BasePart") and typeof(offset) == "CFrame" then
-			child.CFrame = rootCFrame * offset
-		end
-	end
+	return model
 end
 
 -- Мировое положение и направление грузовика.
@@ -102,7 +73,7 @@ local function truckCFrame(truck: Logistics.Truck): CFrame
 	local fx, fz = Logistics.position(truck)
 	local x = grid.originX + (fx + 0.5) * grid.cellSize
 	local z = grid.originZ + (fz + 0.5) * grid.cellSize
-	local pos = Vector3.new(x, GridConfig.groundHeight + 0.3 + TRUCK_SIZE.Y / 2, z)
+	local pos = Vector3.new(x, GridConfig.groundHeight + 0.3 + TruckModel.size.Y / 2, z)
 	local path = truck.path
 	if path and truck.pathIndex < #path then
 		local nextCell = path[truck.pathIndex + 1]
@@ -117,15 +88,15 @@ end
 local function syncModel(entry: Entry)
 	local truck = entry.truck
 	local cf = truckCFrame(truck)
-	local current = entry.root.CFrame
+	local current = entry.shownCFrame
 	-- Стоящий грузовик сохраняет направление, в котором приехал.
-	if truck.path == nil or truck.pathIndex >= #(truck.path :: { any }) then
+	if current and (truck.path == nil or truck.pathIndex >= #(truck.path :: { any })) then
 		cf = CFrame.new(cf.Position) * current.Rotation
 	end
-	-- Стоящие грузовики не двигаем: каждая запись CFrame уходит всем клиентам.
+	-- Стоящие грузовики не трогаем: каждая запись уходит всем клиентам.
 	if cf ~= current then
-		entry.root.CFrame = cf
-		placeParts(entry.model, cf)
+		entry.shownCFrame = cf
+		entry.model:SetAttribute("CFrame", cf)
 	end
 	if entry.shownState ~= truck.state then
 		entry.shownState = truck.state
@@ -166,9 +137,9 @@ local function syncDepots()
 				for _ = 1, TrucksConfig.perDepot do
 					local truckId = `t{nextTruckId}`
 					nextTruckId += 1
-					local model, root = makeModel(truckId)
+					local model = makeModel(truckId)
 					local truck = Logistics.newTruck(truckId, id, doors[1])
-					local entry: Entry = { truck = truck, model = model, root = root }
+					local entry: Entry = { truck = truck, model = model }
 					syncModel(entry)
 					model.Parent = folder
 					trucks[truckId] = entry
