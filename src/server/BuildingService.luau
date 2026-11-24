@@ -1,6 +1,6 @@
 --!strict
--- Здания региона: приём команд стройки и сноса от клиента, модели зданий, тик производства.
--- Клиент только просит, сервер сам проверяет место и решает.
+-- Здания региона: установка и снос, модели зданий, подъезды к дорогам, тик производства.
+-- Аргументы от клиента проверяет Commands; здесь — только правила региона.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -12,30 +12,31 @@ local GridConfig = require(Config:WaitForChild("Grid"))
 local Recipes = require(Config:WaitForChild("Recipes"))
 local Text = require(Config:WaitForChild("Text"))
 local Grid = require(Sim:WaitForChild("Grid"))
+local Roads = require(Sim:WaitForChild("Roads"))
 local Production = require(Sim:WaitForChild("Production"))
-local BuildCommand = require(Sim:WaitForChild("BuildCommand"))
+local RegionState = require(script.Parent:WaitForChild("RegionState"))
 
 local BuildingService = {}
 
--- Пока у игрока одна эпоха — стартовая. Прогрессия появится вместе с пятилетним планом.
-local CURRENT_ERA = 0
--- Не чаще одной команды за это время от одного игрока: защита от спама.
-local COMMAND_COOLDOWN = 0.1
 local LABEL_MAX_DISTANCE = 300
 
 type Entry = {
 	id: string,
 	typeId: string,
+	x: number,
+	z: number,
+	rotation: number,
 	model: Model,
+	connected: boolean, -- есть ли дорога у края здания
 	recipe: Production.Recipe?,
 	state: Production.State?,
 	label: TextLabel?,
 }
 
-local grid = Grid.new(GridConfig, 0, 0)
+local grid = RegionState.grid
+local roads = RegionState.roads
 local entries: { [string]: Entry } = {}
 local nextId = 1
-local lastCommand: { [Player]: number } = {}
 local folder: Folder
 
 local function rgb(c: { number }): Color3
@@ -93,7 +94,7 @@ end
 local function makeLabel(model: Model, height: number): TextLabel
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "Status"
-	gui.Size = UDim2.fromOffset(180, 44)
+	gui.Size = UDim2.fromOffset(180, 52)
 	gui.StudsOffsetWorldSpace = Vector3.new(0, height / 2 + 3, 0)
 	gui.MaxDistance = LABEL_MAX_DISTANCE
 	gui.AlwaysOnTop = true
@@ -106,6 +107,7 @@ local function makeLabel(model: Model, height: number): TextLabel
 	label.Font = Enum.Font.GothamMedium
 	label.TextSize = 13
 	label.TextWrapped = true
+	label.RichText = true
 	label.Parent = gui
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 6)
@@ -127,68 +129,75 @@ local function stockText(stock: { [string]: number }): string
 end
 
 local function updateLabel(entry: Entry)
-	local label, state = entry.label, entry.state
-	if label == nil or state == nil then
+	local label = entry.label
+	if label == nil then
 		return
 	end
 	local name = BuildingsConfig[entry.typeId].name.ru
-	local status = Text.status[state.status]
-	local line = if status then status.ru else state.status
-	local stock = stockText(state.output)
-	label.Text = `{name}: {line}` .. (if stock ~= "" then `\n{stock}` else "")
-	entry.model:SetAttribute("Status", state.status)
+	local lines = {}
+	local state = entry.state
+	if state then
+		local status = Text.status[state.status]
+		table.insert(lines, `{name}: {if status then status.ru else state.status}`)
+		local stock = stockText(state.output)
+		if stock ~= "" then
+			table.insert(lines, stock)
+		end
+		entry.model:SetAttribute("Status", state.status)
+	else
+		table.insert(lines, name)
+	end
+	if not entry.connected then
+		table.insert(lines, `<font color="#ff8a7a">{Text.status.no_road.ru}</font>`)
+	end
+	label.Text = table.concat(lines, "\n")
 end
 
-local function throttled(player: Player): boolean
-	local now = os.clock()
-	local last = lastCommand[player]
-	if last and now - last < COMMAND_COOLDOWN then
-		return true
-	end
-	lastCommand[player] = now
-	return false
+local function checkConnection(entry: Entry)
+	local def = BuildingsConfig[entry.typeId]
+	local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, entry.rotation)
+	entry.connected = #Roads.entrances(roads, entry.x, entry.z, w, d) > 0
+	entry.model:SetAttribute("Connected", entry.connected)
+	updateLabel(entry)
 end
 
-local function place(player: Player, typeId: any, x: any, z: any, rotation: any): (boolean, string)
-	if throttled(player) then
-		return false, "too_fast"
-	end
-	local command, err = BuildCommand.parse(BuildingsConfig, CURRENT_ERA, typeId, x, z, rotation)
-	if command == nil then
-		return false, err or "bad_args"
-	end
-	local def = BuildingsConfig[command.typeId]
+-- Ставит здание. Возвращает true и id или false и код ошибки.
+function BuildingService.place(typeId: string, x: number, z: number, rotation: number): (boolean, string)
+	local def = BuildingsConfig[typeId]
 	local id = `b{nextId}`
-	local ok, placeErr = Grid.place(grid, id, command.x, command.z, def.sizeX, def.sizeZ, command.rotation)
+	local ok, placeErr = Grid.place(grid, id, x, z, def.sizeX, def.sizeZ, rotation)
 	if not ok then
 		return false, placeErr or "occupied"
 	end
 	nextId += 1
 
-	local model = buildModel(id, command.typeId, command.x, command.z, command.rotation)
-	local entry: Entry = { id = id, typeId = command.typeId, model = model }
-	local recipe = Recipes[command.typeId]
+	local model = buildModel(id, typeId, x, z, rotation)
+	local entry: Entry = {
+		id = id,
+		typeId = typeId,
+		x = x,
+		z = z,
+		rotation = rotation,
+		model = model,
+		connected = false,
+	}
+	entry.label = makeLabel(model, def.height)
+	local recipe = Recipes[typeId]
 	if recipe then
 		entry.recipe = recipe
 		entry.state = Production.new()
-		entry.label = makeLabel(model, def.height)
-		updateLabel(entry)
 	end
+	checkConnection(entry)
 	model.Parent = folder
 	entries[id] = entry
-	print(
-		`[Пятилетка] {player.Name} построил {def.name.ru} ({id}) в клетке {command.x}, {command.z}`
-	)
 	return true, id
 end
 
-local function remove(player: Player, id: any): (boolean, string)
-	if throttled(player) then
-		return false, "too_fast"
-	end
-	if type(id) ~= "string" then
-		return false, "bad_args"
-	end
+function BuildingService.has(id: string): boolean
+	return entries[id] ~= nil
+end
+
+function BuildingService.remove(id: string): (boolean, string)
 	local entry = entries[id]
 	if entry == nil then
 		return false, "not_found"
@@ -196,8 +205,14 @@ local function remove(player: Player, id: any): (boolean, string)
 	Grid.remove(grid, id)
 	entry.model:Destroy()
 	entries[id] = nil
-	print(`[Пятилетка] {player.Name} снёс {id}`)
 	return true, id
+end
+
+-- Пересчитать подъезды всех зданий. Вызывается после изменения дорог.
+function BuildingService.refreshConnections()
+	for _, entry in entries do
+		checkConnection(entry)
+	end
 end
 
 -- region — Persistent-модель региона (см. World): всё содержимое региона живёт в ней.
@@ -205,22 +220,6 @@ function BuildingService.start(region: Model)
 	folder = Instance.new("Folder")
 	folder.Name = "Buildings"
 	folder.Parent = region
-
-	local remotes = Instance.new("Folder")
-	remotes.Name = "Remotes"
-	local placeRemote = Instance.new("RemoteFunction")
-	placeRemote.Name = "PlaceBuilding"
-	placeRemote.OnServerInvoke = place
-	placeRemote.Parent = remotes
-	local removeRemote = Instance.new("RemoteFunction")
-	removeRemote.Name = "RemoveBuilding"
-	removeRemote.OnServerInvoke = remove
-	removeRemote.Parent = remotes
-	remotes.Parent = ReplicatedStorage
-
-	game:GetService("Players").PlayerRemoving:Connect(function(player)
-		lastCommand[player] = nil
-	end)
 end
 
 -- Один шаг симуляции всех зданий. Пока рабочих хватает всегда: население появится позже.
@@ -232,14 +231,6 @@ function BuildingService.tick(dt: number)
 			updateLabel(entry)
 		end
 	end
-end
-
-function BuildingService.count(): number
-	local n = 0
-	for _ in entries do
-		n += 1
-	end
-	return n
 end
 
 return BuildingService

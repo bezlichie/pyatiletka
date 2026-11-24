@@ -8,6 +8,8 @@ local GridConfig = require("../src/shared/Config/Grid")
 local BuildCommand = require("../src/shared/Sim/BuildCommand")
 local Buildings = require("../src/shared/Config/Buildings")
 local Text = require("../src/shared/Config/Text")
+local Roads = require("../src/shared/Sim/Roads")
+local RoadsConfig = require("../src/shared/Config/Roads")
 
 local passed, failed = 0, 0
 
@@ -247,6 +249,95 @@ test("у всех ресурсов и статусов есть тексты", f
 	for _, status in { "working", "no_input", "output_full", "no_workers" } do
 		assert(Text.status[status], `нет текста статуса {status}`)
 	end
+end)
+
+-- Дороги
+
+local function roadLine(r, x1, z1, x2, z2)
+	for _, c in Roads.linePath(x1, z1, x2, z2) do
+		Roads.add(r, c.x, c.z)
+	end
+end
+
+test("линия дороги идёт буквой «Г» без повторов", function()
+	local p = Roads.linePath(2, 1, 4, 3)
+	eq(#p, 5, "клеток")
+	eq(p[1].x, 2, "начало x")
+	eq(p[3].x, 4, "поворот x")
+	eq(p[3].z, 1, "поворот z")
+	eq(p[5].z, 3, "конец z")
+	eq(#Roads.linePath(5, 5, 5, 5), 1, "одна клетка")
+	local back = Roads.linePath(3, 3, 1, 3)
+	eq(#back, 3, "назад по X")
+	eq(back[3].x, 1, "конец назад")
+	eq(#Roads.linePath(0, 4, 0, 0), 5, "назад по Z")
+end)
+
+test("дороги добавляются, удаляются и не выходят за край", function()
+	local r = Roads.new(10)
+	eq(Roads.add(r, 1, 1), true, "добавлена")
+	eq(Roads.add(r, 1, 1), false, "повтор")
+	eq(Roads.add(r, 10, 0), false, "за краем")
+	eq(r.count, 1, "число")
+	eq(Roads.remove(r, 1, 1), true, "удалена")
+	eq(Roads.has(r, 1, 1), false, "нет дороги")
+	eq(r.count, 0, "число после удаления")
+end)
+
+test("подъезд к зданию — дорога у края, но не по диагонали", function()
+	local r = Roads.new(20)
+	-- здание 3×2 с углом в (5, 5) занимает x 5..7, z 5..6
+	Roads.add(r, 4, 4) -- диагональ, не считается
+	eq(#Roads.entrances(r, 5, 5, 3, 2), 0, "только диагональ")
+	Roads.add(r, 8, 6) -- справа от края
+	local e = Roads.entrances(r, 5, 5, 3, 2)
+	eq(#e, 1, "один подъезд")
+	eq(e[1].x, 8, "x подъезда")
+end)
+
+test("поиск пути по дорогам находит кратчайший путь", function()
+	local r = Roads.new(20)
+	roadLine(r, 0, 0, 10, 0)
+	roadLine(r, 10, 0, 10, 5)
+	roadLine(r, 0, 0, 0, 5)
+	roadLine(r, 0, 5, 10, 5)
+	local path = Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 10, z = 5 } })
+	assert(path, "путь есть")
+	eq(#path, 16, "длина пути")
+	eq(path[1].x, 0, "старт")
+	eq(path[#path].x, 10, "финиш x")
+	eq(path[#path].z, 5, "финиш z")
+	for i = 2, #path do
+		local dx = math.abs(path[i].x - path[i - 1].x)
+		local dz = math.abs(path[i].z - path[i - 1].z)
+		eq(dx + dz, 1, `шаг {i} к соседу`)
+	end
+end)
+
+test("без связи пути нет, разрыв дороги рвёт путь", function()
+	local r = Roads.new(20)
+	roadLine(r, 0, 0, 5, 0)
+	roadLine(r, 8, 0, 12, 0)
+	eq(Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }), nil, "разрыв")
+	roadLine(r, 5, 0, 8, 0)
+	assert(Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }), "после стройки есть")
+	Roads.remove(r, 6, 0)
+	eq(Roads.findPath(r, { { x = 0, z = 0 } }, { { x = 12, z = 0 } }), nil, "после сноса нет")
+	local same = Roads.findPath(r, { { x = 1, z = 0 } }, { { x = 1, z = 0 } })
+	assert(same, "старт совпадает с целью")
+	eq(#same, 1, "путь из одной клетки")
+end)
+
+test("команда дороги проверяет числа и длину", function()
+	local cmd = BuildCommand.parseRoad(10, 0, 0, 4, 5)
+	assert(cmd, "10 клеток можно")
+	local _, err = BuildCommand.parseRoad(10, 0, 0, 5, 5)
+	eq(err, "too_long", "11 клеток нельзя")
+	local _, err2 = BuildCommand.parseRoad(10, 0, 0, 1.5, 0)
+	eq(err2, "bad_args", "дробное")
+	local _, err3 = BuildCommand.parseRoad(10, "0", 0, 1, 0)
+	eq(err3, "bad_args", "строка")
+	assert(RoadsConfig.maxCellsPerCommand >= 1, "конфиг дорог")
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)
