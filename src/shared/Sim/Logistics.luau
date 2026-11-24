@@ -46,10 +46,14 @@ export type Config = {
 	cellsPerSecond: number,
 	loadSeconds: number,
 	unloadSeconds: number,
+	maxCandidates: number?, -- сколько заказов рассматривать за раз (нет — все)
+	maxDispatchPerStep: number?, -- сколько свободных грузовиков ищут заказ за один шаг парка
 }
 
 export type World = {
 	findPath: (from: { Cell }, to: { Cell }) -> { Cell }?,
+	-- Есть ли дорога между клетками (без построения маршрута). Нет — проверяется через findPath.
+	connected: ((from: { Cell }, to: { Cell }) -> boolean)?,
 	entrances: (buildingId: string) -> { Cell }, -- пусто, если здания нет или нет подъезда
 	isRoad: (cell: Cell) -> boolean,
 	take: (buildingId: string, resource: string, amount: number) -> number,
@@ -78,20 +82,55 @@ function Logistics.newTruck(id: string, depotId: string, cell: Cell): Truck
 end
 
 -- Возможные заказы, самые выгодные первыми: сначала полные склады, потом по объёму.
+-- Чтобы не перебирать все пары «откуда — куда» на большой карте, берутся лучшие
+-- отправители и лучшие получатели, пока не наберётся config.maxCandidates заказов.
 function Logistics.candidates(offers: { Offer }, demands: { Demand }, config: Config): { Job }
-	local jobs: { Job } = {}
-	local fullness: { [Job]: boolean } = {}
+	local eligible: { Offer } = {}
 	for _, offer in offers do
 		if offer.amount >= config.minLoad or (offer.full and offer.amount > 0) then
-			for _, demand in demands do
-				if demand.resource == offer.resource and demand.id ~= offer.id and demand.amount > 0 then
-					local amount = math.min(offer.amount, demand.amount, config.capacity)
-					local job =
-						{ from = offer.id, to = demand.id, resource = offer.resource, amount = amount }
-					fullness[job] = offer.full
-					table.insert(jobs, job)
+			table.insert(eligible, offer)
+		end
+	end
+	table.sort(eligible, function(a, b)
+		if a.full ~= b.full then
+			return a.full
+		end
+		return a.amount > b.amount
+	end)
+	local byResource: { [string]: { Demand } } = {}
+	for _, demand in demands do
+		if demand.amount > 0 then
+			local list = byResource[demand.resource]
+			if list == nil then
+				list = {}
+				byResource[demand.resource] = list
+			end
+			table.insert(list, demand)
+		end
+	end
+	for _, list in byResource do
+		table.sort(list, function(a, b)
+			return a.amount > b.amount
+		end)
+	end
+
+	local limit = config.maxCandidates or math.huge
+	local jobs: { Job } = {}
+	local fullness: { [Job]: boolean } = {}
+	for _, offer in eligible do
+		for _, demand in byResource[offer.resource] or {} do
+			if demand.id ~= offer.id then
+				local amount = math.min(offer.amount, demand.amount, config.capacity)
+				local job = { from = offer.id, to = demand.id, resource = offer.resource, amount = amount }
+				fullness[job] = offer.full
+				table.insert(jobs, job)
+				if #jobs >= limit then
+					break
 				end
 			end
+		end
+		if #jobs >= limit then
+			break
 		end
 	end
 	table.sort(jobs, function(a, b)
@@ -122,7 +161,11 @@ function Logistics.dispatch(truck: Truck, jobs: { Job }, world: World): Job?
 		if #fromEntrances > 0 and #toEntrances > 0 then
 			-- Есть дорога до отправителя и от отправителя до получателя.
 			local path = world.findPath({ truck.cell }, fromEntrances)
-			if path and world.findPath(fromEntrances, toEntrances) then
+			local connected = world.connected
+			local linked = if connected
+				then connected(fromEntrances, toEntrances)
+				else world.findPath(fromEntrances, toEntrances) ~= nil
+			if path and linked then
 				truck.job = job
 				startPath(truck, path, "to_pickup")
 				return job
@@ -325,6 +368,235 @@ function Logistics.step(truck: Truck, dt: number, config: Config, world: World)
 		-- Не всё приняли: остаток везём дальше.
 		Logistics.redirect(truck, world)
 	end
+end
+
+-- Парк грузовиков региона: все грузовики, резервы складов и раздача заказов.
+-- Резервы не дают двум грузовикам поехать за одним и тем же грузом
+-- или привезти в склад больше, чем в нём места.
+
+-- Что нужно парку от региона: здания, их склады и дороги.
+export type Source = {
+	ids: () -> { string },
+	offers: (id: string) -> { { resource: string, amount: number, full: boolean } },
+	demands: (id: string) -> { { resource: string, amount: number } },
+	findPath: (from: { Cell }, to: { Cell }) -> { Cell }?,
+	connected: ((from: { Cell }, to: { Cell }) -> boolean)?,
+	entrances: (buildingId: string) -> { Cell },
+	isRoad: (cell: Cell) -> boolean,
+	take: (buildingId: string, resource: string, amount: number) -> number,
+	deliver: (buildingId: string, resource: string, amount: number) -> number,
+}
+
+type Reserves = { [string]: { [string]: number } }
+
+export type Fleet = {
+	source: Source,
+	world: World,
+	trucks: { Truck }, -- в порядке появления
+	reservedOut: Reserves, -- сколько уже обещано забрать у здания
+	reservedIn: Reserves, -- сколько уже обещано привезти в здание
+	cursor: number, -- с какого грузовика начинать раздачу заказов (по кругу)
+}
+
+local function reserve(map: Reserves, id: string, resource: string, delta: number)
+	local byRes = map[id]
+	if byRes == nil then
+		byRes = {}
+		map[id] = byRes
+	end
+	local value = math.max(0, (byRes[resource] or 0) + delta)
+	byRes[resource] = if value > 0 then value else nil
+	if next(byRes) == nil then
+		map[id] = nil
+	end
+end
+
+local function reserved(map: Reserves, id: string, resource: string): number
+	local byRes = map[id]
+	return if byRes then byRes[resource] or 0 else 0
+end
+
+function Logistics.newFleet(source: Source): Fleet
+	local reservedOut: Reserves = {}
+	local reservedIn: Reserves = {}
+	local world: World = {
+		findPath = source.findPath,
+		connected = source.connected,
+		entrances = source.entrances,
+		isRoad = source.isRoad,
+		take = source.take,
+		deliver = source.deliver,
+		release = function(job, side)
+			if side == "out" then
+				reserve(reservedOut, job.from, job.resource, -job.amount)
+			else
+				reserve(reservedIn, job.to, job.resource, -job.amount)
+			end
+		end,
+		claimDemand = function(resource, amount)
+			local bestId, bestSpace = nil, 0
+			for _, id in source.ids() do
+				for _, demand in source.demands(id) do
+					if demand.resource == resource then
+						local space = demand.amount - reserved(reservedIn, id, resource)
+						if space > bestSpace then
+							bestId, bestSpace = id, space
+						end
+					end
+				end
+			end
+			if bestId == nil then
+				return nil, 0
+			end
+			local claimed = math.min(amount, bestSpace)
+			reserve(reservedIn, bestId, resource, claimed)
+			return bestId, claimed
+		end,
+	}
+	return {
+		source = source,
+		world = world,
+		trucks = {},
+		reservedOut = reservedOut,
+		reservedIn = reservedIn,
+		cursor = 1,
+	}
+end
+
+function Logistics.addTruck(fleet: Fleet, truck: Truck)
+	table.insert(fleet.trucks, truck)
+end
+
+-- Убрать грузовик (снесли автопарк). Его заказ срывается, резервы снимаются.
+function Logistics.removeTruck(fleet: Fleet, id: string): Truck?
+	for i, truck in fleet.trucks do
+		if truck.id == id then
+			Logistics.abort(truck, fleet.world)
+			table.remove(fleet.trucks, i)
+			return truck
+		end
+	end
+	return nil
+end
+
+-- Что можно забрать и куда можно привезти с учётом резервов.
+local function collectOrders(fleet: Fleet): ({ Offer }, { Demand })
+	local source = fleet.source
+	local offers, demands = {}, {}
+	for _, id in source.ids() do
+		for _, offer in source.offers(id) do
+			local free = offer.amount - reserved(fleet.reservedOut, id, offer.resource)
+			if free > 0 then
+				table.insert(offers, { id = id, resource = offer.resource, amount = free, full = offer.full })
+			end
+		end
+		for _, demand in source.demands(id) do
+			local space = demand.amount - reserved(fleet.reservedIn, id, demand.resource)
+			if space > 0 then
+				table.insert(demands, { id = id, resource = demand.resource, amount = space })
+			end
+		end
+	end
+	return offers, demands
+end
+
+-- Вычесть выданный заказ из списков, чтобы следующий грузовик не взял тот же груз.
+local function consume(offers: { Offer }, demands: { Demand }, job: Job)
+	for _, offer in offers do
+		if offer.id == job.from and offer.resource == job.resource then
+			offer.amount -= job.amount
+		end
+	end
+	for _, demand in demands do
+		if demand.id == job.to and demand.resource == job.resource then
+			demand.amount -= job.amount
+		end
+	end
+end
+
+-- Один шаг всего парка: свободные грузовики получают заказы, все грузовики едут.
+-- Заказы ищут не больше config.maxDispatchPerStep грузовиков за шаг, по кругу,
+-- чтобы при сотне свободных машин шаг оставался дешёвым. Остальные ждут следующего шага.
+function Logistics.stepFleet(fleet: Fleet, dt: number, config: Config)
+	local world = fleet.world
+	local trucks = fleet.trucks
+	local count = #trucks
+	local budget = config.maxDispatchPerStep or math.huge
+	local offers: { Offer }?, demands: { Demand }?
+	local jobs: { Job }? = nil
+
+	if count > 0 then
+		local start = ((fleet.cursor - 1) % count) + 1
+		local lastTried = start - 1
+		for n = 0, count - 1 do
+			local i = ((start - 1 + n) % count) + 1
+			local truck = trucks[i]
+			if truck.state == "idle" then
+				if not world.isRoad(truck.cell) then
+					-- Дорогу под стоящим грузовиком снесли: он переносится к автопарку.
+					local doors = world.entrances(truck.depotId)
+					if #doors > 0 then
+						truck.cell = doors[1]
+					end
+				end
+				if truck.cargo > 0 then
+					-- Груз остался в кузове (получателя снесли): ищем, куда его отвезти.
+					Logistics.redirect(truck, world)
+				elseif budget > 0 then
+					if offers == nil or demands == nil then
+						offers, demands = collectOrders(fleet)
+					end
+					if jobs == nil then
+						jobs = Logistics.candidates(offers :: { Offer }, demands :: { Demand }, config)
+					end
+					local list = jobs :: { Job }
+					local job = nil
+					if #list > 0 then
+						budget -= 1
+						lastTried = i
+						job = Logistics.dispatch(truck, list, world)
+					end
+					if job then
+						reserve(fleet.reservedOut, job.from, job.resource, job.amount)
+						reserve(fleet.reservedIn, job.to, job.resource, job.amount)
+						consume(offers :: { Offer }, demands :: { Demand }, job)
+						jobs = nil -- заказы изменились, пересчитать для следующего
+					else
+						Logistics.sendHome(truck, world)
+					end
+				end
+			end
+		end
+		fleet.cursor = lastTried + 1
+	end
+
+	for _, truck in trucks do
+		Logistics.step(truck, dt, config, world)
+	end
+end
+
+-- Груз в кузовах, который едет к получателю: id здания -> ресурс -> сколько.
+-- Нужен для сохранения: грузовики не сохраняются, а их груз засчитывается получателю.
+function Logistics.inTransit(fleet: Fleet): { [string]: { [string]: number } }
+	local result: { [string]: { [string]: number } } = {}
+	for _, truck in fleet.trucks do
+		local job = truck.job
+		local resource = truck.cargoResource
+		if
+			job
+			and resource
+			and truck.cargo > 0
+			and (truck.state == "to_dropoff" or truck.state == "unloading")
+		then
+			local byRes = result[job.to]
+			if byRes == nil then
+				byRes = {}
+				result[job.to] = byRes
+			end
+			byRes[resource] = (byRes[resource] or 0) + truck.cargo
+		end
+	end
+	return result
 end
 
 return Logistics

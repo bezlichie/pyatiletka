@@ -35,6 +35,9 @@ type Entry = {
 	label: TextLabel?,
 	note: string?, -- дополнительная строка таблички (например, у автопарка)
 	construction: Construction.State?, -- есть, пока здание — стройплощадка
+	status: string?, -- последний записанный атрибут Status (чтобы не писать то же самое)
+	doors: { Roads.Cell }?, -- подъезды, запомненные для версии дорог doorsVersion
+	doorsVersion: number?,
 }
 
 -- Что здание может отдать грузовику и что принять.
@@ -136,6 +139,13 @@ local function stockText(stock: { [string]: number }): string
 	return table.concat(parts, ", ")
 end
 
+local function setStatus(entry: Entry, status: string?)
+	if entry.status ~= status then
+		entry.status = status
+		entry.model:SetAttribute("Status", status)
+	end
+end
+
 local function updateLabel(entry: Entry)
 	local label = entry.label
 	if label == nil then
@@ -163,7 +173,7 @@ local function updateLabel(entry: Entry)
 		else
 			table.insert(lines, Text.labels.waitingMaterials.ru)
 		end
-		entry.model:SetAttribute("Status", "construction")
+		setStatus(entry, "construction")
 	elseif state then
 		local status = Text.status[state.status]
 		table.insert(lines, `{name}: {if status then status.ru else state.status}`)
@@ -175,10 +185,10 @@ local function updateLabel(entry: Entry)
 		if output ~= "" then
 			table.insert(lines, `{Text.labels.output.ru}: {output}`)
 		end
-		entry.model:SetAttribute("Status", state.status)
+		setStatus(entry, state.status)
 	else
 		table.insert(lines, name)
-		entry.model:SetAttribute("Status", nil)
+		setStatus(entry, nil)
 	end
 	if entry.note then
 		table.insert(lines, entry.note)
@@ -186,7 +196,11 @@ local function updateLabel(entry: Entry)
 	if not entry.connected then
 		table.insert(lines, `<font color="#ff8a7a">{Text.status.no_road.ru}</font>`)
 	end
-	label.Text = table.concat(lines, "\n")
+	local text = table.concat(lines, "\n")
+	-- Табличка обновляется каждый тик, но писать свойство стоит только при изменении.
+	if label.Text ~= text then
+		label.Text = text
+	end
 end
 
 local function checkConnection(entry: Entry)
@@ -259,23 +273,44 @@ function BuildingService.place(typeId: string, x: number, z: number, rotation: n
 end
 
 -- Состояние всех зданий для сохранения.
-function BuildingService.snapshot(): { RegionSave.BuildingSave }
+-- inTransit — груз в кузовах, который едет к зданиям (id -> ресурс -> сколько):
+-- грузовики не сохраняются, поэтому их груз засчитывается получателю в сохранении.
+function BuildingService.snapshot(inTransit: { [string]: { [string]: number } }?): { RegionSave.BuildingSave }
 	local result = {}
-	for _, entry in entries do
+	for id, entry in entries do
+		local cargo = if inTransit then inTransit[id] else nil
 		local save: RegionSave.BuildingSave =
 			{ typeId = entry.typeId, x = entry.x, z = entry.z, rotation = entry.rotation }
 		local state = entry.state
 		if state then
+			local input = table.clone(state.input)
+			local recipe = entry.recipe
+			if cargo and recipe and entry.construction == nil then
+				for resource, amount in cargo do
+					if recipe.inputs[resource] then
+						input[resource] = math.min((input[resource] or 0) + amount, recipe.storage)
+					end
+				end
+			end
 			save.production = {
 				running = state.running,
 				progress = state.progress,
-				input = table.clone(state.input),
+				input = input,
 				output = table.clone(state.output),
 			}
 		end
 		local site = entry.construction
 		if site then
-			save.construction = { delivered = table.clone(site.delivered), progress = site.progress }
+			local delivered = table.clone(site.delivered)
+			if cargo then
+				for resource, amount in cargo do
+					local need = site.cost[resource]
+					if need then
+						delivered[resource] = math.min((delivered[resource] or 0) + amount, need)
+					end
+				end
+			end
+			save.construction = { delivered = delivered, progress = site.progress }
 		end
 		table.insert(result, save)
 	end
@@ -338,9 +373,17 @@ function BuildingService.entrances(id: string): { Roads.Cell }
 	if entry == nil then
 		return {}
 	end
-	local def = BuildingsConfig[entry.typeId]
-	local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, entry.rotation)
-	return Roads.entrances(roads, entry.x, entry.z, w, d)
+	-- Грузовики спрашивают подъезды каждый шаг, поэтому они запоминаются
+	-- до следующего изменения дорог. Возвращаемый список не изменять.
+	local doors = entry.doors
+	if doors == nil or entry.doorsVersion ~= roads.version then
+		local def = BuildingsConfig[entry.typeId]
+		local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, entry.rotation)
+		doors = Roads.entrances(roads, entry.x, entry.z, w, d)
+		entry.doors = doors
+		entry.doorsVersion = roads.version
+	end
+	return doors :: { Roads.Cell }
 end
 
 -- Краткие сведения о здании для логистики или nil.

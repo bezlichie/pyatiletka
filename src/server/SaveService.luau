@@ -4,7 +4,8 @@
 -- Остальные игроки строят в том же регионе, но их изменения сохраняются владельцу.
 --
 -- В Studio DataStore работает, только если плейс опубликован в Roblox и включено
--- Game Settings → Security → Enable Studio Access to API Services. Иначе игра идёт без сохранения.
+-- File → Experience Settings → Security → Enable Studio Access to API Services.
+-- Иначе игра идёт без сохранения.
 
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
@@ -16,6 +17,7 @@ local BuildingsConfig = require(Shared:WaitForChild("Config"):WaitForChild("Buil
 local SaveConfig = require(Shared:WaitForChild("Config"):WaitForChild("Save"))
 local RegionSave = require(Shared:WaitForChild("Sim"):WaitForChild("RegionSave"))
 local BuildingService = require(script.Parent:WaitForChild("BuildingService"))
+local TruckService = require(script.Parent:WaitForChild("TruckService"))
 local RoadService = require(script.Parent:WaitForChild("RoadService"))
 
 local SaveService = {}
@@ -29,6 +31,7 @@ local key: string? = nil
 local opened = false -- регион загружен и блокировка наша
 local released = false
 local saving = false
+local disabledReason: string? = nil -- сохранение отключено (стресс-тест)
 
 local function log(text: string)
 	print(`[Пятилетка] {text}`)
@@ -69,7 +72,7 @@ local function open(player: Player)
 		if not ok then
 			warn(
 				`[Пятилетка] сохранение недоступно, игра идёт без него: {err}. `
-					.. "В Studio: опубликуйте плейс и включите Game Settings → Security → "
+					.. "В Studio: опубликуйте плейс и включите File → Experience Settings → Security → "
 					.. "Enable Studio Access to API Services."
 			)
 			store = nil
@@ -102,7 +105,7 @@ end
 local function save(release: boolean)
 	local ds = store
 	local k = key
-	if ds == nil or k == nil or not opened or released then
+	if ds == nil or k == nil or not opened or released or disabledReason ~= nil then
 		return
 	end
 	while saving do
@@ -112,7 +115,8 @@ local function save(release: boolean)
 	local snapshot: RegionSave.Snapshot = {
 		version = RegionSave.VERSION,
 		savedAt = os.time(),
-		buildings = BuildingService.snapshot(),
+		-- Груз в кузовах засчитывается получателям: грузовики не сохраняются.
+		buildings = BuildingService.snapshot(TruckService.inTransit()),
 		roads = RoadService.snapshot(),
 	}
 	local refused = false
@@ -143,6 +147,37 @@ local function save(release: boolean)
 			released = true
 		end
 	end
+end
+
+-- Отключить сохранение до конца сессии (стресс-тест в Studio не должен попасть в сохранение).
+function SaveService.disable(reason: string)
+	if disabledReason ~= nil then
+		return
+	end
+	disabledReason = reason
+	warn(`[Пятилетка] сохранение отключено до конца игры: {reason}`)
+	-- Снять блокировку сразу, не трогая сохранённый регион: иначе следующий запуск
+	-- ждал бы, пока блокировка устареет.
+	local ds, k = store, key
+	if ds == nil or k == nil or not opened or released then
+		return
+	end
+	released = true
+	task.spawn(function()
+		while saving do
+			task.wait(0.1)
+		end
+		local ok, err = pcall(function()
+			ds:UpdateAsync(k, function(old)
+				return RegionSave.unlock(old, SESSION)
+			end)
+		end)
+		if not ok then
+			warn(
+				`[Пятилетка] не удалось снять блокировку региона: {err}`
+			)
+		end
+	end)
 end
 
 local function onPlayerAdded(player: Player)

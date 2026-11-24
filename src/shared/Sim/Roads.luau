@@ -11,12 +11,17 @@ export type Roads = {
 	size: number, -- сторона региона в клетках
 	cells: { [number]: boolean }, -- ключ клетки -> есть дорога
 	count: number,
+	version: number, -- растёт при каждом изменении сети
+	-- Связные куски сети: ключ клетки -> номер куска. Пересчитываются лениво после изменений,
+	-- чтобы поиск пути между несвязанными дорогами отвечал сразу, без обхода всей сети.
+	components: { [number]: number },
+	componentsVersion: number,
 }
 
 local DIRECTIONS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 
 function Roads.new(size: number): Roads
-	return { size = size, cells = {}, count = 0 }
+	return { size = size, cells = {}, count = 0, version = 0, components = {}, componentsVersion = -1 }
 end
 
 local function key(roads: Roads, x: number, z: number): number
@@ -37,6 +42,7 @@ function Roads.add(roads: Roads, x: number, z: number): boolean
 	end
 	roads.cells[key(roads, x, z)] = true
 	roads.count += 1
+	roads.version += 1
 	return true
 end
 
@@ -46,6 +52,7 @@ function Roads.remove(roads: Roads, x: number, z: number): boolean
 	end
 	roads.cells[key(roads, x, z)] = nil
 	roads.count -= 1
+	roads.version += 1
 	return true
 end
 
@@ -97,49 +104,141 @@ function Roads.entrances(roads: Roads, x: number, z: number, w: number, d: numbe
 	return result
 end
 
+-- Пересчитать связные куски сети, если дороги менялись после прошлого пересчёта.
+local function ensureComponents(roads: Roads)
+	if roads.componentsVersion == roads.version then
+		return
+	end
+	local size = roads.size
+	local cells = roads.cells
+	local components: { [number]: number } = {}
+	local queue: { number } = {}
+	local nextId = 0
+	for start in cells do
+		if components[start] == nil then
+			nextId += 1
+			components[start] = nextId
+			table.clear(queue)
+			queue[1] = start
+			local head = 1
+			while head <= #queue do
+				local k = queue[head]
+				head += 1
+				local x = k % size
+				local function visit(nk: number)
+					if cells[nk] and components[nk] == nil then
+						components[nk] = nextId
+						table.insert(queue, nk)
+					end
+				end
+				if x + 1 < size then
+					visit(k + 1)
+				end
+				if x > 0 then
+					visit(k - 1)
+				end
+				visit(k + size)
+				visit(k - size)
+			end
+		end
+	end
+	roads.components = components
+	roads.componentsVersion = roads.version
+end
+
+-- Номер связного куска сети для клетки с дорогой (nil, если дороги нет).
+function Roads.component(roads: Roads, x: number, z: number): number?
+	if not Roads.has(roads, x, z) then
+		return nil
+	end
+	ensureComponents(roads)
+	return roads.components[key(roads, x, z)]
+end
+
+-- Связаны ли дорогой хоть одна клетка a и хоть одна клетка b. Быстрее findPath:
+-- сравниваются номера связных кусков сети, маршрут не строится.
+function Roads.connected(roads: Roads, a: { Cell }, b: { Cell }): boolean
+	ensureComponents(roads)
+	local wanted: { [number]: boolean } = {}
+	for _, c in b do
+		if Roads.has(roads, c.x, c.z) then
+			wanted[roads.components[key(roads, c.x, c.z)]] = true
+		end
+	end
+	for _, c in a do
+		if Roads.has(roads, c.x, c.z) and wanted[roads.components[key(roads, c.x, c.z)]] then
+			return true
+		end
+	end
+	return false
+end
+
 -- Кратчайший путь по дорогам от любой клетки starts до любой клетки goals (поиск в ширину).
 -- Возвращает список клеток от старта до цели включительно или nil, если пути нет.
 function Roads.findPath(roads: Roads, starts: { Cell }, goals: { Cell }): { Cell }?
+	ensureComponents(roads)
+	local components = roads.components
+	local size = roads.size
+	local cells = roads.cells
+
+	-- Цели и куски сети, в которых они лежат.
 	local goalSet: { [number]: boolean } = {}
+	local goalComponents: { [number]: boolean } = {}
 	for _, g in goals do
 		if Roads.has(roads, g.x, g.z) then
-			goalSet[key(roads, g.x, g.z)] = true
+			local k = key(roads, g.x, g.z)
+			goalSet[k] = true
+			goalComponents[components[k]] = true
 		end
 	end
 
+	-- Старты: только те, что связаны хоть с одной целью. Нет таких — пути нет, обходить нечего.
 	local cameFrom: { [number]: number } = {}
 	local queue: { number } = {}
-	local head = 1
 	for _, s in starts do
 		if Roads.has(roads, s.x, s.z) then
 			local k = key(roads, s.x, s.z)
-			if cameFrom[k] == nil then
+			if cameFrom[k] == nil and goalComponents[components[k]] then
 				cameFrom[k] = -1
 				table.insert(queue, k)
 			end
 		end
 	end
 
+	local head = 1
 	while head <= #queue do
 		local k = queue[head]
 		head += 1
 		if goalSet[k] then
-			local path = {}
+			local reversed = {}
 			local cur = k
 			while cur ~= -1 do
-				local cx, cz = cur % roads.size, math.floor(cur / roads.size)
-				table.insert(path, 1, { x = cx, z = cz })
+				table.insert(reversed, { x = cur % size, z = math.floor(cur / size) })
 				cur = cameFrom[cur]
+			end
+			local path = table.create(#reversed)
+			for i = #reversed, 1, -1 do
+				table.insert(path, reversed[i])
 			end
 			return path
 		end
-		local x, z = k % roads.size, math.floor(k / roads.size)
-		for _, n in Roads.neighbors(roads, x, z) do
-			local nk = key(roads, n.x, n.z)
-			if cameFrom[nk] == nil then
-				cameFrom[nk] = k
-				table.insert(queue, nk)
-			end
+		local x = k % size
+		-- Соседи по сторонам без выделения таблиц: ключи соседних клеток.
+		if x + 1 < size and cells[k + 1] and cameFrom[k + 1] == nil then
+			cameFrom[k + 1] = k
+			table.insert(queue, k + 1)
+		end
+		if x > 0 and cells[k - 1] and cameFrom[k - 1] == nil then
+			cameFrom[k - 1] = k
+			table.insert(queue, k - 1)
+		end
+		if cells[k + size] and cameFrom[k + size] == nil then
+			cameFrom[k + size] = k
+			table.insert(queue, k + size)
+		end
+		if cells[k - size] and cameFrom[k - size] == nil then
+			cameFrom[k - size] = k
+			table.insert(queue, k - size)
 		end
 	end
 	return nil

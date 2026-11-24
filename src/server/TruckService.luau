@@ -23,35 +23,27 @@ local STEP_SECONDS = 0.2
 local TRUCK_SIZE = Vector3.new(1.8, 1.6, 3.2)
 local DEPOT_TYPE = "depot"
 
-type Entry = { truck: Logistics.Truck, model: Model, root: BasePart }
+-- shownState и shownCargo — что уже записано в атрибуты модели.
+type Entry = { truck: Logistics.Truck, model: Model, root: BasePart, shownState: string?, shownCargo: number? }
 
 local grid = RegionState.grid
 local roads = RegionState.roads
 local trucks: { [string]: Entry } = {}
 local depotTrucks: { [string]: { string } } = {}
--- Резервы: сколько уже обещано забрать у здания и привезти в здание.
-local reservedOut: { [string]: { [string]: number } } = {}
-local reservedIn: { [string]: { [string]: number } } = {}
 local nextTruckId = 1
 local folder: Folder
+local busyMs = 0 -- сколько миллисекунд ушло на шаги парка с прошлого вопроса (см. takeBusyMs)
 
-local function reserve(map: { [string]: { [string]: number } }, id: string, resource: string, delta: number)
-	local byRes = map[id]
-	if byRes == nil then
-		byRes = {}
-		map[id] = byRes
-	end
-	byRes[resource] = math.max(0, (byRes[resource] or 0) + delta)
-end
-
-local function reserved(map: { [string]: { [string]: number } }, id: string, resource: string): number
-	local byRes = map[id]
-	return if byRes then byRes[resource] or 0 else 0
-end
-
-local world: Logistics.World = {
+-- Парк грузовиков (Sim/Logistics): резервы складов и раздача заказов живут там.
+local fleet = Logistics.newFleet({
+	ids = BuildingService.ids,
+	offers = BuildingService.offers,
+	demands = BuildingService.demands,
 	findPath = function(from, to)
 		return Roads.findPath(roads, from, to)
+	end,
+	connected = function(a, b)
+		return Roads.connected(roads, a, b)
 	end,
 	entrances = BuildingService.entrances,
 	isRoad = function(cell)
@@ -59,33 +51,7 @@ local world: Logistics.World = {
 	end,
 	take = BuildingService.take,
 	deliver = BuildingService.deliver,
-	claimDemand = function(resource, amount)
-		local bestId, bestSpace = nil, 0
-		for _, id in BuildingService.ids() do
-			for _, demand in BuildingService.demands(id) do
-				if demand.resource == resource then
-					local space = demand.amount - reserved(reservedIn, id, resource)
-					if space > bestSpace then
-						bestId, bestSpace = id, space
-					end
-				end
-			end
-		end
-		if bestId == nil then
-			return nil, 0
-		end
-		local claimed = math.min(amount, bestSpace)
-		reserve(reservedIn, bestId, resource, claimed)
-		return bestId, claimed
-	end,
-	release = function(job, side)
-		if side == "out" then
-			reserve(reservedOut, job.from, job.resource, -job.amount)
-		else
-			reserve(reservedIn, job.to, job.resource, -job.amount)
-		end
-	end,
-}
+})
 
 local function makePart(name: string, size: Vector3, color: Color3): Part
 	local part = Instance.new("Part")
@@ -156,10 +122,19 @@ local function syncModel(entry: Entry)
 	if truck.path == nil or truck.pathIndex >= #(truck.path :: { any }) then
 		cf = CFrame.new(cf.Position) * current.Rotation
 	end
-	entry.root.CFrame = cf
-	placeParts(entry.model, cf)
-	entry.model:SetAttribute("State", truck.state)
-	entry.model:SetAttribute("Cargo", truck.cargo)
+	-- Стоящие грузовики не двигаем: каждая запись CFrame уходит всем клиентам.
+	if cf ~= current then
+		entry.root.CFrame = cf
+		placeParts(entry.model, cf)
+	end
+	if entry.shownState ~= truck.state then
+		entry.shownState = truck.state
+		entry.model:SetAttribute("State", truck.state)
+	end
+	if entry.shownCargo ~= truck.cargo then
+		entry.shownCargo = truck.cargo
+		entry.model:SetAttribute("Cargo", truck.cargo)
+	end
 end
 
 local function removeTruck(id: string)
@@ -167,7 +142,7 @@ local function removeTruck(id: string)
 	if entry == nil then
 		return
 	end
-	Logistics.abort(entry.truck, world)
+	Logistics.removeTruck(fleet, id)
 	entry.model:Destroy()
 	trucks[id] = nil
 end
@@ -192,37 +167,18 @@ local function syncDepots()
 					local truckId = `t{nextTruckId}`
 					nextTruckId += 1
 					local model, root = makeModel(truckId)
-					local entry =
-						{ truck = Logistics.newTruck(truckId, id, doors[1]), model = model, root = root }
+					local truck = Logistics.newTruck(truckId, id, doors[1])
+					local entry: Entry = { truck = truck, model = model, root = root }
 					syncModel(entry)
 					model.Parent = folder
 					trucks[truckId] = entry
+					Logistics.addTruck(fleet, truck)
 					table.insert(ids, truckId)
 				end
 				depotTrucks[id] = ids
 			end
 		end
 	end
-end
-
--- Что можно забрать и куда можно привезти с учётом резервов.
-local function collectOrders(): ({ Logistics.Offer }, { Logistics.Demand })
-	local offers, demands = {}, {}
-	for _, id in BuildingService.ids() do
-		for _, offer in BuildingService.offers(id) do
-			local free = offer.amount - reserved(reservedOut, id, offer.resource)
-			if free > 0 then
-				table.insert(offers, { id = id, resource = offer.resource, amount = free, full = offer.full })
-			end
-		end
-		for _, demand in BuildingService.demands(id) do
-			local space = demand.amount - reserved(reservedIn, id, demand.resource)
-			if space > 0 then
-				table.insert(demands, { id = id, resource = demand.resource, amount = space })
-			end
-		end
-	end
-	return offers, demands
 end
 
 local function updateDepotNotes()
@@ -242,34 +198,30 @@ local function updateDepotNotes()
 end
 
 local function step(dt: number)
+	local t0 = os.clock()
 	syncDepots()
+	Logistics.stepFleet(fleet, dt, TrucksConfig)
 	for _, entry in trucks do
-		local truck = entry.truck
-		if truck.state == "idle" and not world.isRoad(truck.cell) then
-			-- Дорогу под стоящим грузовиком снесли: он возвращается к автопарку.
-			local doors = BuildingService.entrances(truck.depotId)
-			if #doors > 0 then
-				truck.cell = doors[1]
-			end
-		end
-		if truck.state == "idle" and truck.cargo > 0 then
-			-- Груз остался в кузове (получателя снесли): ищем, куда его отвезти.
-			Logistics.redirect(truck, world)
-		elseif truck.state == "idle" then
-			-- Заказы пересчитываем для каждого грузовика: предыдущий мог занять резерв.
-			local offers, demands = collectOrders()
-			local job = Logistics.dispatch(truck, Logistics.candidates(offers, demands, TrucksConfig), world)
-			if job then
-				reserve(reservedOut, job.from, job.resource, job.amount)
-				reserve(reservedIn, job.to, job.resource, job.amount)
-			else
-				Logistics.sendHome(truck, world)
-			end
-		end
-		Logistics.step(truck, dt, TrucksConfig, world)
 		syncModel(entry)
 	end
 	updateDepotNotes()
+	busyMs += (os.clock() - t0) * 1000
+end
+
+-- Сколько миллисекунд ушло на грузовики с прошлого вызова (для замера тика).
+function TruckService.takeBusyMs(): number
+	local ms = busyMs
+	busyMs = 0
+	return ms
+end
+
+function TruckService.count(): number
+	return #fleet.trucks
+end
+
+-- Груз в кузовах по получателям — для сохранения (см. Logistics.inTransit).
+function TruckService.inTransit(): { [string]: { [string]: number } }
+	return Logistics.inTransit(fleet)
 end
 
 function TruckService.start(region: Model)
