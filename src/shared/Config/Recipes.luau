@@ -15,7 +15,14 @@ export type Recipe = {
 local Recipes: { [string]: Recipe } = {
 	-- Стройматериалы
 	forestry = { inputs = {}, outputs = { logs = 1 }, cycleSeconds = 4, workers = 4, storage = 20, era = 0 },
-	sawmill = { inputs = { logs = 2 }, outputs = { boards = 1 }, cycleSeconds = 5, workers = 6, storage = 20, era = 0 },
+	sawmill = {
+		inputs = { logs = 2 },
+		outputs = { boards = 1 },
+		cycleSeconds = 5,
+		workers = 6,
+		storage = 20,
+		era = 0,
+	},
 	quarry = { inputs = {}, outputs = { gravel = 1 }, cycleSeconds = 4, workers = 5, storage = 20, era = 1 },
 	concrete_plant = {
 		inputs = { gravel = 2 },
@@ -28,7 +35,14 @@ local Recipes: { [string]: Recipe } = {
 
 	-- Еда
 	farm = { inputs = {}, outputs = { grain = 2 }, cycleSeconds = 8, workers = 5, storage = 30, era = 0 },
-	food_plant = { inputs = { grain = 2 }, outputs = { food = 2 }, cycleSeconds = 6, workers = 6, storage = 30, era = 0 },
+	food_plant = {
+		inputs = { grain = 2 },
+		outputs = { food = 2 },
+		cycleSeconds = 6,
+		workers = 6,
+		storage = 30,
+		era = 0,
+	},
 
 	-- Металл
 	ore_mine = { inputs = {}, outputs = { ore = 1 }, cycleSeconds = 5, workers = 8, storage = 20, era = 2 },

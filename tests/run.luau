@@ -58,15 +58,18 @@ test("лесопилка без брёвен ждёт сырьё", function()
 	eq(Production.tick(r, s, 1, r.workers), "no_input", "статус")
 end)
 
-test("лесопилка списывает брёвна в начале цикла и выпускает доски", function()
-	local r = Recipes.sawmill
-	local s = Production.new()
-	eq(Production.deliver(r, s, "logs", 4), 4, "принято брёвен")
-	Production.tick(r, s, 1, r.workers)
-	eq(s.input.logs, 2, "брёвна после старта цикла")
-	run(r, s, r.cycleSeconds - 1, r.workers)
-	eq(s.output.boards, 1, "доски")
-end)
+test(
+	"лесопилка списывает брёвна в начале цикла и выпускает доски",
+	function()
+		local r = Recipes.sawmill
+		local s = Production.new()
+		eq(Production.deliver(r, s, "logs", 4), 4, "принято брёвен")
+		Production.tick(r, s, 1, r.workers)
+		eq(s.input.logs, 2, "брёвна после старта цикла")
+		run(r, s, r.cycleSeconds - 1, r.workers)
+		eq(s.output.boards, 1, "доски")
+	end
+)
 
 test("склад не принимает больше ёмкости и чужие ресурсы", function()
 	local r = Recipes.sawmill
@@ -75,16 +78,19 @@ test("склад не принимает больше ёмкости и чужи
 	eq(Production.deliver(r, s, "grain", 5), 0, "принято зерна")
 end)
 
-test("полный выходной склад останавливает здание, не тратя сырьё", function()
-	local r = Recipes.sawmill
-	local s = Production.new()
-	s.output.boards = r.storage
-	Production.deliver(r, s, "logs", 2)
-	eq(Production.tick(r, s, 1, r.workers), "output_full", "статус")
-	eq(s.input.logs, 2, "брёвна не списаны")
-	eq(Production.take(s, "boards", 5), 5, "забрано досок")
-	eq(Production.tick(r, s, 1, r.workers), "working", "статус после разгрузки")
-end)
+test(
+	"полный выходной склад останавливает здание, не тратя сырьё",
+	function()
+		local r = Recipes.sawmill
+		local s = Production.new()
+		s.output.boards = r.storage
+		Production.deliver(r, s, "logs", 2)
+		eq(Production.tick(r, s, 1, r.workers), "output_full", "статус")
+		eq(s.input.logs, 2, "брёвна не списаны")
+		eq(Production.take(s, "boards", 5), 5, "забрано досок")
+		eq(Production.tick(r, s, 1, r.workers), "working", "статус после разгрузки")
+	end
+)
 
 test("у каждого рецепта корректные числа", function()
 	for id, r in Recipes do

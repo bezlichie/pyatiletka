@@ -22,6 +22,8 @@ while true do
 	Production.tick(recipe, forestry, TICK_SECONDS, recipe.workers)
 	elapsed += TICK_SECONDS
 	if elapsed % 10 == 0 then
-		print(`[Пятилетка] лесозаготовка: {forestry.status}, брёвен на складе: {forestry.output.logs or 0}`)
+		print(
+			`[Пятилетка] лесозаготовка: {forestry.status}, брёвен на складе: {forestry.output.logs or 0}`
+		)
 	end
 end
