@@ -119,6 +119,18 @@ function RoadService.restore(flat: { number }): number
 	return count
 end
 
+-- Снести все дороги (стресс-тест). Подъезды зданий пересчитываются один раз.
+function RoadService.clear()
+	for id, part in parts do
+		local x, z = part:GetAttribute("CellX") :: number, part:GetAttribute("CellZ") :: number
+		Grid.remove(grid, id)
+		Roads.remove(roads, x, z)
+		part:Destroy()
+	end
+	table.clear(parts)
+	BuildingService.refreshConnections()
+end
+
 function RoadService.start(region: Model)
 	folder = Instance.new("Folder")
 	folder.Name = "Roads"

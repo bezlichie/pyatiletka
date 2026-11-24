@@ -15,6 +15,9 @@ local TrucksConfig = require("../src/shared/Config/Trucks")
 local Construction = require("../src/shared/Sim/Construction")
 local RegionSave = require("../src/shared/Sim/RegionSave")
 local SaveConfig = require("../src/shared/Config/Save")
+local TickStats = require("../src/shared/Sim/TickStats")
+local StressLayout = require("../src/shared/Sim/StressLayout")
+local Perf = require("../src/shared/Config/Perf")
 
 local passed, failed = 0, 0
 
@@ -731,6 +734,242 @@ test("конфиг сохранения корректный", function()
 	)
 	assert(#SaveConfig.dataStoreName > 0, "имя хранилища")
 end)
+
+test("снятие блокировки без записи региона", function()
+	local snap = RegionSave.emptySnapshot(0)
+	local rec = RegionSave.store(nil, "A", 1000, 300, snap, false)
+	eq(RegionSave.unlock(rec, "B"), nil, "чужую не снимаем")
+	local unlocked = RegionSave.unlock(rec, "A")
+	assert(unlocked, "своя снимается")
+	eq(unlocked.lock, nil, "без блокировки")
+	eq(unlocked.region, snap, "регион прежний")
+	eq(RegionSave.unlock(nil, "A"), nil, "пустая запись")
+end)
+
+-- Производительность (шаг 7)
+
+test(
+	"связность сети пересчитывается после стройки и сноса",
+	function()
+		local r = Roads.new(20)
+		roadLine(r, 0, 0, 5, 0)
+		roadLine(r, 8, 0, 12, 0)
+		local a, b = { { x = 0, z = 0 } }, { { x = 12, z = 0 } }
+		eq(Roads.connected(r, a, b), false, "разрыв")
+		assert(Roads.component(r, 0, 0) ~= Roads.component(r, 12, 0), "разные куски")
+		roadLine(r, 5, 0, 8, 0)
+		eq(Roads.connected(r, a, b), true, "после стройки")
+		Roads.remove(r, 7, 0)
+		eq(Roads.connected(r, a, b), false, "после сноса")
+		eq(Roads.component(r, 7, 0), nil, "нет дороги — нет куска")
+		eq(Roads.connected(r, a, { { x = 15, z = 15 } }), false, "цель не на дороге")
+		-- Край ряда не соединяется со следующим рядом: клетки (19, 0) и (0, 1) не соседи.
+		local edge = Roads.new(20)
+		Roads.add(edge, 19, 0)
+		Roads.add(edge, 0, 1)
+		eq(
+			Roads.connected(edge, { { x = 19, z = 0 } }, { { x = 0, z = 1 } }),
+			false,
+			"перенос строки"
+		)
+	end
+)
+
+test("заказы: ограничение числа кандидатов", function()
+	local offers, demands = {}, {}
+	for i = 1, 10 do
+		table.insert(offers, { id = `f{i}`, resource = "logs", amount = i, full = false })
+		table.insert(demands, { id = `s{i}`, resource = "logs", amount = 20 })
+	end
+	eq(
+		#Logistics.candidates(offers, demands, truckConfig),
+		90,
+		"без ограничения: все пары (кроме мелочи)"
+	)
+	local limited = table.clone(truckConfig) :: any
+	limited.maxCandidates = 5
+	local jobs = Logistics.candidates(offers, demands, limited)
+	eq(#jobs, 5, "не больше лимита")
+	eq(jobs[1].from, "f10", "самый большой склад первым")
+	eq(jobs[1].amount, 6, "не больше вместимости")
+end)
+
+-- Тестовый регион для парка: дорога z = 0 от x = 0 до 20, подъезды у зданий как в makeWorld.
+local function makeFleet(stock: { [string]: number }, space: { [string]: number })
+	local r = Roads.new(32)
+	roadLine(r, 0, 0, 20, 0)
+	local doors =
+		{ depot = { x = 0, z = 0 }, f = { x = 10, z = 0 }, s = { x = 20, z = 0 }, s2 = { x = 15, z = 0 } }
+	local ids = { "depot", "f", "s", "s2" }
+	local source = {
+		ids = function()
+			return ids
+		end,
+		offers = function(id)
+			local n = stock[id] or 0
+			return if n > 0 then { { resource = "logs", amount = n, full = false } } else {}
+		end,
+		demands = function(id)
+			local n = space[id] or 0
+			return if n > 0 then { { resource = "logs", amount = n } } else {}
+		end,
+		findPath = function(from, to)
+			return Roads.findPath(r, from, to)
+		end,
+		connected = function(a, b)
+			return Roads.connected(r, a, b)
+		end,
+		entrances = function(id)
+			return if doors[id] then { doors[id] } else {}
+		end,
+		isRoad = function(c)
+			return Roads.has(r, c.x, c.z)
+		end,
+		take = function(id, _res, amount)
+			local n = math.min(stock[id] or 0, amount)
+			stock[id] = (stock[id] or 0) - n
+			return n
+		end,
+		deliver = function(id, _res, amount)
+			local n = math.min(space[id] or 0, amount)
+			space[id] = (space[id] or 0) - n
+			stock[`got_{id}`] = (stock[`got_{id}`] or 0) + n
+			return n
+		end,
+	}
+	return Logistics.newFleet(source)
+end
+
+test("парк: два грузовика не едут за одним грузом", function()
+	local stock, space = { f = 6 }, { s = 20 }
+	local fleet = makeFleet(stock, space)
+	for i = 1, 2 do
+		Logistics.addTruck(fleet, Logistics.newTruck(`t{i}`, "depot", { x = 0, z = 0 }))
+	end
+	Logistics.stepFleet(fleet, 0.25, truckConfig)
+	eq(fleet.trucks[1].state, "to_pickup", "первый поехал")
+	eq(fleet.trucks[2].state, "idle", "второму груза не осталось")
+	for _ = 1, 80 do
+		Logistics.stepFleet(fleet, 0.25, truckConfig)
+	end
+	eq(stock.got_s, 6, "довезено ровно 6")
+	eq(next(fleet.reservedOut), nil, "резервы отправителя сняты")
+	eq(next(fleet.reservedIn), nil, "резервы получателя сняты")
+end)
+
+test(
+	"парк: заказы ищут не больше N грузовиков за шаг, по кругу",
+	function()
+		local stock, space = { f = 60 }, { s = 100 }
+		local fleet = makeFleet(stock, space)
+		for i = 1, 5 do
+			Logistics.addTruck(fleet, Logistics.newTruck(`t{i}`, "depot", { x = 0, z = 0 }))
+		end
+		local limited = table.clone(truckConfig) :: any
+		limited.maxDispatchPerStep = 2
+		local function busy(): number
+			local n = 0
+			for _, t in fleet.trucks do
+				if t.state ~= "idle" then
+					n += 1
+				end
+			end
+			return n
+		end
+		Logistics.stepFleet(fleet, 0.25, limited)
+		eq(busy(), 2, "после первого шага")
+		Logistics.stepFleet(fleet, 0.25, limited)
+		eq(busy(), 4, "после второго")
+		Logistics.stepFleet(fleet, 0.25, limited)
+		eq(busy(), 5, "после третьего все при деле")
+	end
+)
+
+test(
+	"парк: груз в кузове засчитывается получателю, снесённый автопарк убирает грузовик",
+	function()
+		local stock, space = { f = 6 }, { s = 20 }
+		local fleet = makeFleet(stock, space)
+		Logistics.addTruck(fleet, Logistics.newTruck("t1", "depot", { x = 0, z = 0 }))
+		local t = fleet.trucks[1]
+		for _ = 1, 40 do
+			Logistics.stepFleet(fleet, 0.25, truckConfig)
+			if t.state == "to_dropoff" then
+				break
+			end
+		end
+		eq(t.state, "to_dropoff", "везёт")
+		local transit = Logistics.inTransit(fleet)
+		eq(transit.s and transit.s.logs, 6, "6 брёвен едут на лесопилку")
+		Logistics.removeTruck(fleet, "t1")
+		eq(#fleet.trucks, 0, "грузовик убран")
+		eq(next(fleet.reservedIn), nil, "резерв получателя снят")
+	end
+)
+
+test("статистика тика: среднее, p95 и максимум по окну", function()
+	local stats = TickStats.new(20)
+	eq(TickStats.summary(stats).count, 0, "пусто")
+	for i = 1, 25 do
+		TickStats.add(stats, i) -- в окне остаются 6..25
+	end
+	local s = TickStats.summary(stats)
+	eq(s.count, 20, "окно")
+	eq(s.max, 25, "максимум")
+	eq(s.avg, 15.5, "среднее")
+	eq(s.p95, 24, "p95")
+	assert(
+		Perf.budgetMs > 0 and Perf.windowSeconds > 0 and Perf.reportSeconds > 0,
+		"конфиг замера"
+	)
+end)
+
+test(
+	"стресс-регион: здания не пересекаются, у всех есть подъезд, сеть одна",
+	function()
+		local size = GridConfig.regionCells
+		local layout = StressLayout.build(40, size, 0, 0, RoadsConfig.maxCellsPerCommand)
+		eq(layout.chains, 40, "цепочек")
+		eq(#layout.buildings, 160, "зданий")
+		local g = Grid.new(GridConfig, 0, 0)
+		local r = Roads.new(size)
+		for _, line in layout.roads do
+			local path = Roads.linePath(line.x1, line.z1, line.x2, line.z2)
+			assert(
+				#path <= RoadsConfig.maxCellsPerCommand,
+				"отрезок не длиннее команды"
+			)
+			for _, c in path do
+				if not Roads.has(r, c.x, c.z) then
+					assert(Grid.place(g, `road_{c.x}_{c.z}`, c.x, c.z, 1, 1, 0), "дорога встала")
+					Roads.add(r, c.x, c.z)
+				end
+			end
+		end
+		local first: { Roads.Cell }? = nil
+		for i, p in layout.buildings do
+			local def = Buildings[p.typeId]
+			assert(def, `тип {p.typeId}`)
+			assert(
+				Grid.place(g, `b{i}`, p.x, p.z, def.sizeX, def.sizeZ, p.rotation),
+				`здание {i} встало`
+			)
+			local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, p.rotation)
+			local doors = Roads.entrances(r, p.x, p.z, w, d)
+			assert(#doors > 0, `у здания {i} есть подъезд`)
+			if first == nil then
+				first = doors
+			else
+				assert(Roads.connected(r, first, doors), `здание {i} в общей сети`)
+			end
+		end
+		local huge = StressLayout.build(10000, size, 0, 0, RoadsConfig.maxCellsPerCommand)
+		assert(
+			huge.chains < 10000 and huge.chains > 100,
+			"лишние цепочки не помещаются"
+		)
+	end
+)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)
 if failed > 0 then

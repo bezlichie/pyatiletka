@@ -152,4 +152,13 @@ function RegionSave.store(
 	return { lock = if release then nil else { session = session, time = now }, region = snapshot }
 end
 
+-- Преобразование для снятия блокировки без записи региона (сохранение отключено).
+-- Сохранённый регион остаётся прежним. nil (не писать), если блокировка не наша.
+function RegionSave.unlock(record: Record?, session: string): Record?
+	if record == nil or record.lock == nil or record.lock.session ~= session then
+		return nil
+	end
+	return { lock = nil, region = record.region }
+end
+
 return RegionSave

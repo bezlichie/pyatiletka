@@ -1,10 +1,14 @@
 --!strict
--- Плавное движение грузовиков. Сервер переставляет модели несколько раз в секунду,
--- клиент прячет их и рисует свои копии.
+-- Плавное движение грузовиков. Сервер несколько раз в секунду пишет положение грузовика
+-- в атрибут CFrame его (пустой) модели, а клиент рисует свою модель (Shared/Visual/TruckModel).
 -- Копия показывает положение «из недавнего прошлого» (RENDER_DELAY) и плавно
 -- интерполирует между двумя полученными от сервера положениями, поэтому едет ровно.
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+
+local TruckModel =
+	require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Visual"):WaitForChild("TruckModel"))
 
 local TruckView = {}
 
@@ -16,23 +20,19 @@ local SNAP_DISTANCE = 12 -- скачок дальше этого (телепор
 type Snapshot = { time: number, cframe: CFrame }
 type Visual = {
 	source: Model,
-	sourceRoot: BasePart,
 	model: Model,
 	root: BasePart,
 	cargo: BasePart?,
 	snapshots: { Snapshot },
 }
 
--- Прячем серверную модель только у себя: сервер не меняет прозрачность после создания.
-local function hidePart(d: Instance)
-	if d:IsA("BasePart") then
-		d.Transparency = 1
-	end
-end
-
 local function record(visual: Visual)
+	local cf = visual.source:GetAttribute("CFrame")
+	if typeof(cf) ~= "CFrame" then
+		return
+	end
 	local snapshots = visual.snapshots
-	table.insert(snapshots, { time = os.clock(), cframe = visual.sourceRoot.CFrame })
+	table.insert(snapshots, { time = os.clock(), cframe = cf })
 	if #snapshots > MAX_SNAPSHOTS then
 		table.remove(snapshots, 1)
 	end
@@ -70,40 +70,23 @@ function TruckView.start()
 		if not child:IsA("Model") or visuals[child] then
 			return
 		end
-		local sourceRoot = child:WaitForChild("Root", 5) :: BasePart?
-		if sourceRoot == nil or child.Parent ~= trucksFolder then
-			return
-		end
-		local copy = child:Clone()
-		local root = copy:FindFirstChild("Root") :: BasePart
-		for _, d in copy:GetDescendants() do
-			if d:IsA("BasePart") then
-				d.Anchored = true
-			end
-		end
-		copy.Parent = visualsFolder
-		for _, d in child:GetDescendants() do
-			hidePart(d)
-		end
-		child.DescendantAdded:Connect(hidePart)
-
+		local model, root, cargo = TruckModel.build(child.Name)
 		local visual: Visual = {
 			source = child,
-			sourceRoot = sourceRoot,
-			model = copy,
+			model = model,
 			root = root,
-			cargo = copy:FindFirstChild("Cargo") :: BasePart?,
+			cargo = cargo,
 			snapshots = {},
 		}
 		record(visual)
-		sourceRoot:GetPropertyChangedSignal("CFrame"):Connect(function()
+		child:GetAttributeChangedSignal("CFrame"):Connect(function()
 			record(visual)
 		end)
 		visuals[child] = visual
 	end
 
 	for _, child in trucksFolder:GetChildren() do
-		task.spawn(track, child)
+		track(child)
 	end
 	trucksFolder.ChildAdded:Connect(track)
 	trucksFolder.ChildRemoved:Connect(function(child)
@@ -117,15 +100,13 @@ function TruckView.start()
 	RunService.RenderStepped:Connect(function()
 		local renderTime = os.clock() - RENDER_DELAY
 		for _, visual in visuals do
-			local cf = sample(visual.snapshots, renderTime)
-			visual.root.CFrame = cf
-			-- Детали без сварки: ставим каждую по смещению от корпуса (атрибут Offset).
-			for _, child in visual.model:GetChildren() do
-				local offset = child:GetAttribute("Offset")
-				if child:IsA("BasePart") and typeof(offset) == "CFrame" then
-					child.CFrame = cf * offset
-				end
+			if #visual.snapshots == 0 then
+				continue -- положение ещё не пришло: модель не показываем
 			end
+			if visual.model.Parent ~= visualsFolder then
+				visual.model.Parent = visualsFolder
+			end
+			TruckModel.place(visual.model, visual.root, sample(visual.snapshots, renderTime))
 			local cargo = visual.cargo
 			if cargo then
 				local amount = visual.source:GetAttribute("Cargo")
