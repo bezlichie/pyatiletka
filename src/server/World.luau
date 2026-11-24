@@ -4,7 +4,8 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local GridConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("Grid"))
+local GridConfig =
+	require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("Config"):WaitForChild("Grid"))
 
 local World = {}
 
