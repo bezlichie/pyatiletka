@@ -3,6 +3,8 @@
 
 local Production = require("../src/shared/Sim/Production")
 local Recipes = require("../src/shared/Config/Recipes")
+local Grid = require("../src/shared/Sim/Grid")
+local GridConfig = require("../src/shared/Config/Grid")
 
 local passed, failed = 0, 0
 
@@ -104,6 +106,73 @@ test("у каждого рецепта корректные числа", functio
 			assert(n > 0 and n <= r.storage, `{id}: вход {res}`)
 		end
 	end
+end)
+
+-- Сетка
+
+local function smallGrid()
+	-- 10 × 10 клеток по 4 студа, центр в (0, 0): регион от -20 до 20
+	return Grid.new({ cellSize = 4, regionCells = 10 }, 0, 0)
+end
+
+test("мировая точка переводится в клетку и обратно", function()
+	local g = smallGrid()
+	local c = Grid.toCell(g, -20, -20)
+	assert(c, "угол региона в сетке")
+	eq(c.x, 0, "x угла")
+	eq(c.z, 0, "z угла")
+	local c2 = Grid.toCell(g, 1, -1)
+	assert(c2, "центр в сетке")
+	eq(c2.x, 5, "x")
+	eq(c2.z, 4, "z")
+	local wx, wz = Grid.cellCenter(g, 5, 4)
+	eq(wx, 2, "центр x")
+	eq(wz, -2, "центр z")
+end)
+
+test("точка за краем региона не даёт клетку", function()
+	local g = smallGrid()
+	eq(Grid.toCell(g, 20, 0), nil, "правый край")
+	eq(Grid.toCell(g, -20.01, 0), nil, "левее левого края")
+end)
+
+test("поворот меняет стороны прямоугольника", function()
+	eq(#Grid.footprint(0, 0, 3, 2, 0), 6, "клеток")
+	local w, d = Grid.rotatedSize(3, 2, 1)
+	eq(w, 2, "ширина после поворота")
+	eq(d, 3, "глубина после поворота")
+	local cx, cz = Grid.areaCenter(smallGrid(), 0, 0, 3, 2, 1)
+	eq(cx, -16, "центр x")
+	eq(cz, -14, "центр z")
+end)
+
+test("занятые клетки и край региона мешают стройке", function()
+	local g = smallGrid()
+	local ok = Grid.place(g, "a", 2, 2, 3, 3, 0)
+	eq(ok, true, "первое здание")
+	local ok2, err2 = Grid.canPlace(g, 4, 4, 2, 2, 0)
+	eq(ok2, false, "пересечение")
+	eq(err2, "occupied", "причина")
+	local ok3, err3 = Grid.canPlace(g, 9, 9, 2, 1, 0)
+	eq(ok3, false, "за краем")
+	eq(err3, "out_of_bounds", "причина")
+	eq(Grid.canPlace(g, 5, 5, 2, 2, 0), true, "рядом свободно")
+	eq(Grid.objectAt(g, 3, 3), "a", "владелец клетки")
+end)
+
+test("снос освобождает клетки, повторный id не ставится", function()
+	local g = smallGrid()
+	Grid.place(g, "a", 0, 0, 2, 2, 0)
+	eq(Grid.place(g, "a", 5, 5, 1, 1, 0), false, "тот же id")
+	eq(Grid.remove(g, "a"), true, "снос")
+	eq(Grid.objectAt(g, 1, 1), nil, "клетка свободна")
+	eq(Grid.remove(g, "a"), false, "повторный снос")
+	eq(Grid.canPlace(g, 0, 0, 0, 1, 0), false, "нулевой размер")
+end)
+
+test("конфиг сетки корректный", function()
+	assert(GridConfig.cellSize > 0, "cellSize")
+	assert(GridConfig.regionCells > 0 and GridConfig.regionCells % 1 == 0, "regionCells")
 end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)
