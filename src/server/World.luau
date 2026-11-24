@@ -11,7 +11,8 @@ local World = {}
 
 local GROUND_THICKNESS = 4
 
-function World.build()
+-- Возвращает модель региона: в неё кладём всё, что относится к региону.
+function World.build(): Model
 	-- Игрок управляет камерой, а не персонажем: персонажей не создаём.
 	Players.CharacterAutoLoads = false
 
@@ -38,6 +39,7 @@ function World.build()
 	ground.TopSurface = Enum.SurfaceType.Smooth
 	ground.Parent = region
 	region.Parent = workspace
+	return region
 end
 
 return World
