@@ -127,12 +127,13 @@ function Roads.findPath(roads: Roads, starts: { Cell }, goals: { Cell }): { Cell
 			local path = {}
 			local cur = k
 			while cur ~= -1 do
-				table.insert(path, 1, { x = cur % roads.size, z = cur // roads.size })
+				local cx, cz = cur % roads.size, math.floor(cur / roads.size)
+				table.insert(path, 1, { x = cx, z = cz })
 				cur = cameFrom[cur]
 			end
 			return path
 		end
-		local x, z = k % roads.size, k // roads.size
+		local x, z = k % roads.size, math.floor(k / roads.size)
 		for _, n in Roads.neighbors(roads, x, z) do
 			local nk = key(roads, n.x, n.z)
 			if cameFrom[nk] == nil then
