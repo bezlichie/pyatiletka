@@ -2,8 +2,8 @@
 -- Раскладка стресс-региона для замера тика: ряды одинаковых цепочек,
 -- связанных в одну дорожную сеть. Чистый модуль: только координаты клеток.
 --
--- Один блок — 16 × 4 клетки. Сверху вниз по z:
---   z0 .. z0+2   лесозаготовка 3×3, лесопилка 4×3, дом 2×2, автопарк 3×2;
+-- Один блок — 20 × 4 клетки. Сверху вниз по z:
+--   z0 .. z0+2   лесозаготовка 3×3, лесопилка 4×3, дом 2×2, автопарк 3×2, барак 3×2;
 --   z0+3         дорога вдоль блока.
 -- Справа от каждого столбца блоков — вертикальная дорога, над первым рядом — общая.
 
@@ -13,7 +13,7 @@ export type Placement = { typeId: string, x: number, z: number, rotation: number
 export type Line = { x1: number, z1: number, x2: number, z2: number }
 export type Layout = { buildings: { Placement }, roads: { Line }, chains: number }
 
-local BLOCK_W, BLOCK_H = 16, 4
+local BLOCK_W, BLOCK_H = 20, 4
 
 -- Отрезок дороги, разбитый на куски не длиннее maxCells (как у команды игрока).
 local function addLine(roads: { Line }, x1: number, z1: number, x2: number, z2: number, maxCells: number)
@@ -76,6 +76,7 @@ function StressLayout.build(
 			table.insert(layout.buildings, { typeId = "sawmill", x = bx + 4, z = bz, rotation = 0 })
 			table.insert(layout.buildings, { typeId = "house", x = bx + 9, z = bz + 1, rotation = 0 })
 			table.insert(layout.buildings, { typeId = "depot", x = bx + 12, z = bz + 1, rotation = 0 })
+			table.insert(layout.buildings, { typeId = "barracks", x = bx + 16, z = bz + 1, rotation = 0 })
 			addLine(layout.roads, bx, bz + 3, bx + BLOCK_W - 2, bz + 3, maxCells)
 			lastZ = bz + 3
 			placed += 1

@@ -19,6 +19,8 @@ local TrucksConfig = require("../src/shared/Config/Trucks")
 local StressLayout = require("../src/shared/Sim/StressLayout")
 local TickStats = require("../src/shared/Sim/TickStats")
 local Perf = require("../src/shared/Config/Perf")
+local Population = require("../src/shared/Sim/Population")
+local PopulationConfig = require("../src/shared/Config/Population")
 
 local STEP = 0.2
 local SECONDS = 300 -- игровых секунд на один прогон
@@ -35,6 +37,8 @@ type Entry = {
 	site: Construction.State?,
 	doors: { Roads.Cell }?,
 	doorsVersion: number?,
+	residents: number?,
+	workers: number,
 }
 
 local function makeRegion(chains: number)
@@ -55,7 +59,7 @@ local function makeRegion(chains: number)
 		local id = `b{n}`
 		assert(Grid.place(grid, id, p.x, p.z, def.sizeX, def.sizeZ, p.rotation), `место для {id}`)
 		local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, p.rotation)
-		local entry: Entry = { id = id, typeId = p.typeId, x = p.x, z = p.z, w = w, d = d }
+		local entry: Entry = { id = id, typeId = p.typeId, x = p.x, z = p.z, w = w, d = d, workers = 0 }
 		local recipe = Recipes[p.typeId]
 		if recipe then
 			entry.recipe = recipe
@@ -63,6 +67,8 @@ local function makeRegion(chains: number)
 		end
 		if def.cost then
 			entry.site = Construction.new(def.cost, def.buildSeconds or 0)
+		elseif def.residents then
+			entry.residents = 0
 		end
 		entries[id] = entry
 		table.insert(ids, id)
@@ -174,14 +180,50 @@ local function makeRegion(chains: number)
 	}
 end
 
+-- Как на сервере: рабочие распределяются раз в allocateSeconds, жильцы въезжают постепенно.
+local function allocate(region)
+	local houses, places = {}, {}
+	for _, id in region.ids do
+		local e = region.entries[id]
+		local capacity = Buildings[e.typeId].residents
+		if e.residents and capacity then
+			table.insert(houses, {
+				id = id,
+				x = e.x,
+				z = e.z,
+				w = e.w,
+				d = e.d,
+				capacity = capacity,
+				residents = e.residents,
+			})
+		end
+		if e.recipe and e.recipe.workers > 0 and e.site == nil then
+			table.insert(places, { id = id, x = e.x, z = e.z, w = e.w, d = e.d, need = e.recipe.workers })
+		end
+	end
+	local result = Population.allocate(houses, places, PopulationConfig)
+	for id, e in region.entries do
+		e.workers = result.workers[id] or 0
+	end
+end
+
 local function tickBuildings(entries: { [string]: Entry })
 	for _, e in entries do
 		if e.site then
 			if Construction.tick(e.site, 1) then
 				e.site = nil
+				if Buildings[e.typeId].residents then
+					e.residents = 0
+				end
 			end
-		elseif e.recipe and e.state then
-			Production.tick(e.recipe, e.state, 1, e.recipe.workers)
+		else
+			local capacity = Buildings[e.typeId].residents
+			if e.residents and capacity then
+				e.residents = Population.grow(e.residents, capacity, 1, PopulationConfig)
+			end
+			if e.recipe and e.state then
+				Production.tick(e.recipe, e.state, 1, e.workers)
+			end
 		end
 	end
 end
@@ -190,8 +232,11 @@ local function run(chains: number, config: Logistics.Config, label: string)
 	local region = makeRegion(chains)
 	local stats = TickStats.new(SECONDS)
 	local built = 0
-	for _ = 1, SECONDS do
+	for second = 1, SECONDS do
 		local t0 = os.clock()
+		if (second - 1) % PopulationConfig.allocateSeconds == 0 then
+			allocate(region)
+		end
 		tickBuildings(region.entries)
 		for _ = 1, math.floor(1 / STEP + 0.5) do
 			Logistics.stepFleet(region.fleet, STEP, config)

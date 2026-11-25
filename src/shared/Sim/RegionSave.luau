@@ -25,6 +25,7 @@ export type BuildingSave = {
 	rotation: number,
 	production: ProductionSave?,
 	construction: ConstructionSave?,
+	residents: number?, -- жилое здание: сколько живёт (этап 2)
 }
 
 export type Snapshot = {
@@ -90,6 +91,10 @@ function RegionSave.sanitize(raw: any, knownTypes: { [string]: any }): Snapshot?
 						input = cleanStock(p.input),
 						output = cleanStock(p.output),
 					}
+				end
+				local r = b.residents
+				if type(r) == "number" and r == r and r >= 0 and r < 1e6 then
+					entry.residents = r
 				end
 				local c = b.construction
 				if type(c) == "table" then

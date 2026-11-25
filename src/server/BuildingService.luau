@@ -17,6 +17,8 @@ local Production = require(Sim:WaitForChild("Production"))
 local Construction = require(Sim:WaitForChild("Construction"))
 local RegionState = require(script.Parent:WaitForChild("RegionState"))
 local RegionSave = require(Sim:WaitForChild("RegionSave"))
+local Population = require(Sim:WaitForChild("Population"))
+local PopulationConfig = require(Config:WaitForChild("Population"))
 
 local BuildingService = {}
 
@@ -38,6 +40,10 @@ type Entry = {
 	status: string?, -- последний записанный атрибут Status (чтобы не писать то же самое)
 	doors: { Roads.Cell }?, -- подъезды, запомненные для версии дорог doorsVersion
 	doorsVersion: number?,
+	order: number, -- порядковый номер здания: раньше поставленные первыми получают рабочих
+	residents: number?, -- жилое здание: сколько живёт сейчас (есть только у достроенного)
+	employed: number?, -- жилое здание: сколько жильцов работает
+	workers: number, -- сколько рабочих сейчас на этом здании
 }
 
 -- Что здание может отдать грузовику и что принять.
@@ -49,6 +55,7 @@ local roads = RegionState.roads
 local entries: { [string]: Entry } = {}
 local nextId = 1
 local folder: Folder
+local sinceAllocate = math.huge -- секунд с прошлого распределения рабочих (сразу распределить)
 
 local function rgb(c: { number }): Color3
 	return Color3.fromRGB(c[1], c[2], c[3])
@@ -177,6 +184,14 @@ local function updateLabel(entry: Entry)
 	elseif state then
 		local status = Text.status[state.status]
 		table.insert(lines, `{name}: {if status then status.ru else state.status}`)
+		local recipe = entry.recipe
+		if recipe and recipe.workers > 0 then
+			local color = if entry.workers < recipe.workers then "#ffc46b" else "#ffffff"
+			table.insert(
+				lines,
+				`<font color="{color}">{Text.labels.workers.ru}: {entry.workers}/{recipe.workers}</font>`
+			)
+		end
 		local input = stockText(state.input)
 		local output = stockText(state.output)
 		if input ~= "" then
@@ -189,6 +204,14 @@ local function updateLabel(entry: Entry)
 	else
 		table.insert(lines, name)
 		setStatus(entry, nil)
+	end
+	local residents = entry.residents
+	local capacity = BuildingsConfig[entry.typeId].residents
+	if residents and capacity then
+		table.insert(
+			lines,
+			`{Text.labels.residents.ru}: {math.floor(residents)}/{capacity}, {Text.labels.working.ru}: {entry.employed or 0}`
+		)
 	end
 	if entry.note then
 		table.insert(lines, entry.note)
@@ -251,6 +274,8 @@ local function create(
 		rotation = rotation,
 		model = model,
 		connected = false,
+		order = nextId - 1,
+		workers = 0,
 	}
 	entry.label = makeLabel(model, def.height)
 	local recipe = Recipes[typeId]
@@ -262,9 +287,13 @@ local function create(
 		entry.construction = Construction.new(def.cost, def.buildSeconds or 0)
 		setSiteLook(model, true)
 	end
+	if def.residents and entry.construction == nil then
+		entry.residents = 0 -- жильцы въезжают постепенно (Population.grow)
+	end
 	checkConnection(entry)
 	model.Parent = folder
 	entries[id] = entry
+	sinceAllocate = math.huge
 	return true, id
 end
 
@@ -312,6 +341,9 @@ function BuildingService.snapshot(inTransit: { [string]: { [string]: number } }?
 			end
 			save.construction = { delivered = delivered, progress = site.progress }
 		end
+		if entry.residents then
+			save.residents = entry.residents
+		end
 		table.insert(result, save)
 	end
 	return result
@@ -348,6 +380,11 @@ function BuildingService.restore(save: RegionSave.BuildingSave): boolean
 		end
 		site.progress = math.min(c.progress, site.buildSeconds)
 	end
+	local capacity = BuildingsConfig[entry.typeId].residents
+	if entry.residents and capacity and save.residents then
+		entry.residents = math.min(save.residents, capacity)
+	end
+	sinceAllocate = math.huge
 	updateLabel(entry)
 	return true
 end
@@ -364,6 +401,7 @@ function BuildingService.remove(id: string): (boolean, string)
 	Grid.remove(grid, id)
 	entry.model:Destroy()
 	entries[id] = nil
+	sinceAllocate = math.huge -- рабочие снесённого дома или завода перераспределяются
 	return true, id
 end
 
@@ -501,8 +539,73 @@ function BuildingService.start(region: Model)
 	folder.Parent = region
 end
 
--- Один шаг симуляции всех зданий. Пока рабочих хватает всегда: население появится позже.
+local function rectOf(entry: Entry): Population.Rect
+	local def = BuildingsConfig[entry.typeId]
+	local w, d = Grid.rotatedSize(def.sizeX, def.sizeZ, entry.rotation)
+	return { x = entry.x, z = entry.z, w = w, d = d }
+end
+
+-- Распределить рабочих: каждое здание с рецептом берёт людей из ближайших домов.
+local function allocateWorkers()
+	local houses: { Population.House } = {}
+	local places: { Population.Workplace } = {}
+	local placeEntries: { Entry } = {}
+	for _, entry in entries do
+		local capacity = BuildingsConfig[entry.typeId].residents
+		if entry.residents and capacity then
+			local r = rectOf(entry)
+			table.insert(houses, {
+				id = entry.id,
+				x = r.x,
+				z = r.z,
+				w = r.w,
+				d = r.d,
+				capacity = capacity,
+				residents = entry.residents,
+			})
+		end
+		local recipe = entry.recipe
+		if recipe and recipe.workers > 0 and entry.construction == nil then
+			table.insert(placeEntries, entry)
+		end
+	end
+	table.sort(placeEntries, function(a, b)
+		return a.order < b.order
+	end)
+	for _, entry in placeEntries do
+		local r = rectOf(entry)
+		local recipe = entry.recipe :: Production.Recipe
+		table.insert(places, { id = entry.id, x = r.x, z = r.z, w = r.w, d = r.d, need = recipe.workers })
+	end
+	local result = Population.allocate(houses, places, PopulationConfig)
+	local population, working, jobs = 0, 0, 0
+	for id, entry in entries do
+		entry.workers = result.workers[id] or 0
+		if entry.residents then
+			entry.employed = result.employed[id] or 0
+			population += math.floor(entry.residents)
+			working += entry.employed :: number
+		end
+	end
+	for _, place in places do
+		jobs += place.need
+	end
+	-- Итоги региона для интерфейса (верхняя панель появится в шаге 4).
+	local region = folder.Parent
+	if region then
+		region:SetAttribute("Population", population)
+		region:SetAttribute("Working", working)
+		region:SetAttribute("Jobs", jobs)
+	end
+end
+
+-- Один шаг симуляции всех зданий.
 function BuildingService.tick(dt: number)
+	sinceAllocate += dt
+	if sinceAllocate >= PopulationConfig.allocateSeconds then
+		sinceAllocate = 0
+		allocateWorkers()
+	end
 	for _, entry in entries do
 		local site = entry.construction
 		if site then
@@ -510,17 +613,25 @@ function BuildingService.tick(dt: number)
 			if Construction.tick(site, dt) then
 				entry.construction = nil
 				setSiteLook(entry.model, false)
+				if BuildingsConfig[entry.typeId].residents then
+					entry.residents = 0
+					sinceAllocate = math.huge
+				end
 				print(
 					`[Пятилетка] достроено: {BuildingsConfig[entry.typeId].name.ru} ({entry.id})`
 				)
 			end
 			updateLabel(entry)
 		else
+			local capacity = BuildingsConfig[entry.typeId].residents
+			if entry.residents and capacity then
+				entry.residents = Population.grow(entry.residents, capacity, dt, PopulationConfig)
+			end
 			local recipe, state = entry.recipe, entry.state
 			if recipe and state then
-				Production.tick(recipe, state, dt, recipe.workers)
-				updateLabel(entry)
+				Production.tick(recipe, state, dt, entry.workers)
 			end
+			updateLabel(entry)
 		end
 	end
 end

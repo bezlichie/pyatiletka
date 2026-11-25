@@ -48,6 +48,7 @@ export type Config = {
 	unloadSeconds: number,
 	maxCandidates: number?, -- сколько заказов рассматривать за раз (нет — все)
 	maxDispatchPerStep: number?, -- сколько свободных грузовиков ищут заказ за один шаг парка
+	serviceRadius: number?, -- заказы только в этом радиусе от автопарка, в клетках (нет — по всей карте)
 }
 
 export type World = {
@@ -81,10 +82,16 @@ function Logistics.newTruck(id: string, depotId: string, cell: Cell): Truck
 	}
 end
 
--- Возможные заказы, самые выгодные первыми: сначала полные склады, потом по объёму.
+-- Возможные заказы, самые выгодные первыми: сначала полные склады, потом ближние
+-- (если передано расстояние distance между зданиями), потом по объёму.
 -- Чтобы не перебирать все пары «откуда — куда» на большой карте, берутся лучшие
--- отправители и лучшие получатели, пока не наберётся config.maxCandidates заказов.
-function Logistics.candidates(offers: { Offer }, demands: { Demand }, config: Config): { Job }
+-- отправители и для каждого лучшие получатели, пока не наберётся config.maxCandidates заказов.
+function Logistics.candidates(
+	offers: { Offer },
+	demands: { Demand },
+	config: Config,
+	distance: ((fromId: string, toId: string) -> number)?
+): { Job }
 	local eligible: { Offer } = {}
 	for _, offer in offers do
 		if offer.amount >= config.minLoad or (offer.full and offer.amount > 0) then
@@ -117,12 +124,29 @@ function Logistics.candidates(offers: { Offer }, demands: { Demand }, config: Co
 	local limit = config.maxCandidates or math.huge
 	local jobs: { Job } = {}
 	local fullness: { [Job]: boolean } = {}
+	local far: { [Job]: number } = {}
 	for _, offer in eligible do
-		for _, demand in byResource[offer.resource] or {} do
+		local list = byResource[offer.resource] or {}
+		local gaps: { [Demand]: number } = {}
+		if distance then
+			-- Для этого отправителя ближние получатели первыми.
+			list = table.clone(list)
+			for _, demand in list do
+				gaps[demand] = distance(offer.id, demand.id)
+			end
+			table.sort(list, function(a, b)
+				if gaps[a] ~= gaps[b] then
+					return gaps[a] < gaps[b]
+				end
+				return a.amount > b.amount
+			end)
+		end
+		for _, demand in list do
 			if demand.id ~= offer.id then
 				local amount = math.min(offer.amount, demand.amount, config.capacity)
 				local job = { from = offer.id, to = demand.id, resource = offer.resource, amount = amount }
 				fullness[job] = offer.full
+				far[job] = gaps[demand] or 0
 				table.insert(jobs, job)
 				if #jobs >= limit then
 					break
@@ -136,6 +160,9 @@ function Logistics.candidates(offers: { Offer }, demands: { Demand }, config: Co
 	table.sort(jobs, function(a, b)
 		if fullness[a] ~= fullness[b] then
 			return fullness[a]
+		end
+		if far[a] ~= far[b] then
+			return far[a] < far[b]
 		end
 		return a.amount > b.amount
 	end)
@@ -523,7 +550,53 @@ function Logistics.stepFleet(fleet: Fleet, dt: number, config: Config)
 	local count = #trucks
 	local budget = config.maxDispatchPerStep or math.huge
 	local offers: { Offer }?, demands: { Demand }?
-	local jobs: { Job }? = nil
+	-- Заказы для автопарка (с радиусом) или общие (без радиуса), пересчитываются после выдачи.
+	local jobsByDepot: { [string]: { Job } } = {}
+	local radius = config.serviceRadius
+
+	local function within(id: string, home: Cell): boolean
+		local door = world.entrances(id)[1]
+		return door ~= nil and math.abs(door.x - home.x) + math.abs(door.z - home.z) <= (radius :: number)
+	end
+
+	-- Расстояние между зданиями по первым подъездам (по сторонам, без диагоналей).
+	local function distance(fromId: string, toId: string): number
+		local a, b = world.entrances(fromId)[1], world.entrances(toId)[1]
+		if a == nil or b == nil then
+			return math.huge
+		end
+		return math.abs(a.x - b.x) + math.abs(a.z - b.z)
+	end
+
+	local function jobsFor(truck: Truck): { Job }
+		local key = if radius then truck.depotId else ""
+		local cached = jobsByDepot[key]
+		if cached then
+			return cached
+		end
+		if offers == nil or demands == nil then
+			offers, demands = collectOrders(fleet)
+		end
+		local o, d = offers :: { Offer }, demands :: { Demand }
+		if radius then
+			local home = world.entrances(truck.depotId)[1] or truck.cell
+			local nearOffers, nearDemands = {}, {}
+			for _, offer in o do
+				if offer.amount > 0 and within(offer.id, home) then
+					table.insert(nearOffers, offer)
+				end
+			end
+			for _, demand in d do
+				if demand.amount > 0 and within(demand.id, home) then
+					table.insert(nearDemands, demand)
+				end
+			end
+			o, d = nearOffers, nearDemands
+		end
+		local list = Logistics.candidates(o, d, config, distance)
+		jobsByDepot[key] = list
+		return list
+	end
 
 	if count > 0 then
 		local start = ((fleet.cursor - 1) % count) + 1
@@ -543,13 +616,7 @@ function Logistics.stepFleet(fleet: Fleet, dt: number, config: Config)
 					-- Груз остался в кузове (получателя снесли): ищем, куда его отвезти.
 					Logistics.redirect(truck, world)
 				elseif budget > 0 then
-					if offers == nil or demands == nil then
-						offers, demands = collectOrders(fleet)
-					end
-					if jobs == nil then
-						jobs = Logistics.candidates(offers :: { Offer }, demands :: { Demand }, config)
-					end
-					local list = jobs :: { Job }
+					local list = jobsFor(truck)
 					local job = nil
 					if #list > 0 then
 						budget -= 1
@@ -560,7 +627,7 @@ function Logistics.stepFleet(fleet: Fleet, dt: number, config: Config)
 						reserve(fleet.reservedOut, job.from, job.resource, job.amount)
 						reserve(fleet.reservedIn, job.to, job.resource, job.amount)
 						consume(offers :: { Offer }, demands :: { Demand }, job)
-						jobs = nil -- заказы изменились, пересчитать для следующего
+						table.clear(jobsByDepot) -- заказы изменились, пересчитать для следующего
 					else
 						Logistics.sendHome(truck, world)
 					end

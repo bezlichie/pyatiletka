@@ -46,6 +46,9 @@ return {
 		building = { ru = "строится", en = "building" },
 		built = { ru = "построен", en = "built" },
 		trucksFree = { ru = "свободно", en = "free" },
+		workers = { ru = "рабочие", en = "workers" },
+		residents = { ru = "жильцов", en = "residents" },
+		working = { ru = "работают", en = "working" },
 	} :: { [string]: Text },
 
 	buildMode = {
