@@ -16,6 +16,8 @@ export type Building = {
 	cost: { [string]: number }?,
 	buildSeconds: number?, -- сколько строится после доставки всех материалов
 	residents: number?, -- жилое здание: сколько жильцов вмещает (см. Config/Population)
+	-- Склад-магазин: какие ресурсы принимает и сколько вмещает. Жители забирают из него сами.
+	stores: { [string]: number }?,
 }
 
 local Buildings: { [string]: Building } = {
@@ -73,6 +75,38 @@ local Buildings: { [string]: Building } = {
 		roofColor = { 70, 90, 140 },
 		era = 0,
 		order = 5,
+	},
+	-- Еда (этап 2, шаг 2): ферма → пищекомбинат → магазин → дома в радиусе.
+	farm = {
+		name = { ru = "Ферма", en = "Farm" },
+		sizeX = 4,
+		sizeZ = 4,
+		height = 3,
+		color = { 196, 176, 96 },
+		roofColor = { 120, 150, 70 },
+		era = 0,
+		order = 6,
+	},
+	food_plant = {
+		name = { ru = "Пищекомбинат", en = "Food plant" },
+		sizeX = 3,
+		sizeZ = 3,
+		height = 6,
+		color = { 200, 205, 210 },
+		roofColor = { 170, 70, 60 },
+		era = 0,
+		order = 7,
+	},
+	shop = {
+		name = { ru = "Магазин", en = "Shop" },
+		sizeX = 2,
+		sizeZ = 2,
+		height = 4,
+		color = { 225, 215, 190 },
+		roofColor = { 60, 120, 110 },
+		era = 0,
+		order = 8,
+		stores = { food = 30 },
 	},
 }
 
