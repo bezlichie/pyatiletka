@@ -374,6 +374,7 @@ function BuildingService.snapshot(inTransit: { [string]: { [string]: number } }?
 		if entry.residents then
 			save.residents = entry.residents
 			save.happiness = entry.happiness
+			save.fed = entry.fed ~= false
 		end
 		local stock = entry.stock
 		if stock then
@@ -431,6 +432,9 @@ function BuildingService.restore(save: RegionSave.BuildingSave): boolean
 	end
 	if entry.residents and save.happiness then
 		entry.happiness = math.clamp(save.happiness, 0, 100)
+	end
+	if entry.residents and save.fed ~= nil then
+		entry.fed = save.fed
 	end
 	local stores = BuildingsConfig[entry.typeId].stores
 	if entry.stock and stores and save.stock then
@@ -639,7 +643,17 @@ local function allocateWorkers()
 			table.insert(placeEntries, entry)
 		end
 	end
+	-- Первыми рабочих получают здания, которым есть чем заниматься (Production.canWork),
+	-- среди них — раньше поставленные. Завод с полным складом не держит людей,
+	-- пока голодные дома ждут ферму.
+	local busy: { [Entry]: boolean } = {}
+	for _, entry in placeEntries do
+		busy[entry] = Production.canWork(entry.recipe :: Production.Recipe, entry.state :: Production.State)
+	end
 	table.sort(placeEntries, function(a, b)
+		if busy[a] ~= busy[b] then
+			return busy[a]
+		end
 		return a.order < b.order
 	end)
 	for _, entry in placeEntries do

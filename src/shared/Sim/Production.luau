@@ -55,13 +55,10 @@ end
 -- Продвигает производство на dt секунд. workers — сколько рабочих сейчас на месте.
 -- Возвращает итоговый статус (он же записывается в state.status).
 function Production.tick(recipe: Recipe, state: State, dt: number, workers: number): Status
-	if recipe.workers > 0 and workers <= 0 then
-		state.status = "no_workers"
-		return state.status
-	end
-
+	local noWorkers = recipe.workers > 0 and workers <= 0
 	if not state.running then
 		-- Не начинаем цикл, если продукцию некуда будет сложить: иначе сырьё пропадёт зря.
+		-- Склад и сырьё проверяются раньше рабочих: игроку важнее настоящая причина простоя.
 		if not outputsFit(recipe, state) then
 			state.status = "output_full"
 			return state.status
@@ -70,11 +67,20 @@ function Production.tick(recipe: Recipe, state: State, dt: number, workers: numb
 			state.status = "no_input"
 			return state.status
 		end
+		if noWorkers then
+			state.status = "no_workers"
+			return state.status
+		end
 		for resource, amount in recipe.inputs do
 			state.input[resource] -= amount
 		end
 		state.running = true
 		state.progress = 0
+	end
+
+	if noWorkers then
+		state.status = "no_workers"
+		return state.status
 	end
 
 	local efficiency = if recipe.workers > 0 then math.min(1, workers / recipe.workers) else 1
@@ -94,6 +100,12 @@ function Production.tick(recipe: Recipe, state: State, dt: number, workers: numb
 
 	state.status = "working"
 	return state.status
+end
+
+-- Может ли здание сейчас работать, если дать ему рабочих: цикл уже идёт
+-- или есть сырьё и место для продукции. Простаивающим рабочих дают в последнюю очередь.
+function Production.canWork(recipe: Recipe, state: State): boolean
+	return state.running or (outputsFit(recipe, state) and hasInputs(recipe, state))
 end
 
 -- Грузовик привозит ресурс на входной склад. Возвращает, сколько здание приняло.

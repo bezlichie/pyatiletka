@@ -1218,6 +1218,40 @@ test("еда: конфиг и здания цепочки", function()
 	eq(snap.buildings[2].happiness, nil, "довольство вне 0–100 отброшено")
 end)
 
+test(
+	"производство: настоящая причина простоя важнее нехватки рабочих",
+	function()
+		local r = Recipes.sawmill
+		local s = Production.new()
+		eq(Production.tick(r, s, 1, 0), "no_input", "нет сырья, даже без рабочих")
+		eq(Production.canWork(r, s), false, "без сырья работать нечем")
+		s.output.boards = r.storage
+		s.input.logs = 2
+		eq(
+			Production.tick(r, s, 1, 0),
+			"output_full",
+			"склад полон, даже без рабочих"
+		)
+		eq(Production.canWork(r, s), false, "склад полон")
+		s.output.boards = 0
+		eq(Production.canWork(r, s), true, "есть сырьё и место")
+		eq(Production.tick(r, s, 1, 0), "no_workers", "только теперь — нет рабочих")
+		eq(s.input.logs, 2, "без рабочих сырьё не списано")
+		local snap = RegionSave.sanitize({
+			version = RegionSave.VERSION,
+			savedAt = 1,
+			buildings = { { typeId = "house", x = 1, z = 1, rotation = 0, residents = 3, fed = false } },
+			roads = {},
+		}, Buildings)
+		assert(snap, "снимок")
+		eq(
+			snap.buildings[1].fed,
+			false,
+			"голодный дом остаётся голодным после загрузки"
+		)
+	end
+)
+
 print(`\nИтого: {passed} пройдено, {failed} упало`)
 if failed > 0 then
 	error("тесты упали")

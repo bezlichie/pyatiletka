@@ -27,6 +27,7 @@ export type BuildingSave = {
 	construction: ConstructionSave?,
 	residents: number?, -- жилое здание: сколько живёт (этап 2)
 	happiness: number?, -- жилое здание: довольство 0–100
+	fed: boolean?, -- жилое здание: получило ли последнюю порцию еды
 	stock: { [string]: number }?, -- магазин: склад
 }
 
@@ -101,6 +102,9 @@ function RegionSave.sanitize(raw: any, knownTypes: { [string]: any }): Snapshot?
 				local h = b.happiness
 				if type(h) == "number" and h == h and h >= 0 and h <= 100 then
 					entry.happiness = h
+				end
+				if type(b.fed) == "boolean" then
+					entry.fed = b.fed
 				end
 				if type(b.stock) == "table" then
 					entry.stock = cleanStock(b.stock)
