@@ -15,6 +15,7 @@ export type Building = {
 	-- иначе первую лесопилку не из чего построить).
 	cost: { [string]: number }?,
 	buildSeconds: number?, -- сколько строится после доставки всех материалов
+	residents: number?, -- жилое здание: сколько жильцов вмещает (см. Config/Population)
 }
 
 local Buildings: { [string]: Building } = {
@@ -38,6 +39,18 @@ local Buildings: { [string]: Building } = {
 		era = 0,
 		order = 2,
 	},
+	-- Барак бесплатный: без жильцов некому работать на первой лесозаготовке.
+	barracks = {
+		name = { ru = "Барак", en = "Barracks" },
+		sizeX = 3,
+		sizeZ = 2,
+		height = 4,
+		color = { 150, 120, 90 },
+		roofColor = { 90, 80, 70 },
+		era = 0,
+		order = 3,
+		residents = 10,
+	},
 	house = {
 		name = { ru = "Жилой дом", en = "House" },
 		sizeX = 2,
@@ -46,9 +59,10 @@ local Buildings: { [string]: Building } = {
 		color = { 214, 200, 170 },
 		roofColor = { 150, 60, 50 },
 		era = 0,
-		order = 3,
+		order = 4,
 		cost = { boards = 8 },
 		buildSeconds = 10,
+		residents = 16,
 	},
 	depot = {
 		name = { ru = "Автопарк", en = "Truck depot" },
@@ -58,7 +72,7 @@ local Buildings: { [string]: Building } = {
 		color = { 150, 156, 162 },
 		roofColor = { 70, 90, 140 },
 		era = 0,
-		order = 4,
+		order = 5,
 	},
 }
 

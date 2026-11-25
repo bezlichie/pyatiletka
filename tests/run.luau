@@ -18,6 +18,8 @@ local SaveConfig = require("../src/shared/Config/Save")
 local TickStats = require("../src/shared/Sim/TickStats")
 local StressLayout = require("../src/shared/Sim/StressLayout")
 local Perf = require("../src/shared/Config/Perf")
+local Population = require("../src/shared/Sim/Population")
+local PopulationConfig = require("../src/shared/Config/Population")
 
 local passed, failed = 0, 0
 
@@ -930,7 +932,7 @@ test(
 		local size = GridConfig.regionCells
 		local layout = StressLayout.build(40, size, 0, 0, RoadsConfig.maxCellsPerCommand)
 		eq(layout.chains, 40, "цепочек")
-		eq(#layout.buildings, 160, "зданий")
+		eq(#layout.buildings, 200, "зданий")
 		local g = Grid.new(GridConfig, 0, 0)
 		local r = Roads.new(size)
 		for _, line in layout.roads do
@@ -967,6 +969,122 @@ test(
 		assert(
 			huge.chains < 10000 and huge.chains > 100,
 			"лишние цепочки не помещаются"
+		)
+	end
+)
+
+-- Население (этап 2, шаг 1)
+
+local popConfig = { workerShare = 0.5, walkRadius = 10, moveInPerSecond = 1 }
+
+test("население: расстояние между краями зданий", function()
+	local a = { x = 0, z = 0, w = 2, d = 2 }
+	eq(Population.gap(a, { x = 2, z = 0, w = 2, d = 2 }), 0, "вплотную")
+	eq(Population.gap(a, { x = 5, z = 0, w = 1, d = 1 }), 3, "по x")
+	eq(Population.gap(a, { x = 5, z = 6, w = 1, d = 1 }), 7, "по x и z")
+	eq(Population.gap({ x = 5, z = 6, w = 1, d = 1 }, a), 7, "симметрично")
+end)
+
+test(
+	"население: жильцы въезжают постепенно, работает доля",
+	function()
+		eq(Population.grow(0, 10, 3, popConfig), 3, "за 3 с")
+		eq(Population.grow(9, 10, 5, popConfig), 10, "не больше вместимости")
+		eq(Population.workersOf(9.7, popConfig), 4, "половина от целых жильцов")
+	end
+)
+
+test(
+	"население: рабочие из ближних домов, раньше поставленные первыми",
+	function()
+		local houses = {
+			{ id = "near", x = 0, z = 0, w = 2, d = 2, capacity = 10, residents = 10 }, -- 5 рабочих
+			{ id = "far", x = 40, z = 0, w = 2, d = 2, capacity = 10, residents = 10 }, -- вне радиуса
+		}
+		local places = {
+			{ id = "f1", x = 4, z = 0, w = 3, d = 3, need = 4 },
+			{ id = "f2", x = 4, z = 4, w = 3, d = 3, need = 4 },
+		}
+		local a = Population.allocate(houses, places, popConfig)
+		eq(a.workers.f1, 4, "первое здание укомплектовано")
+		eq(a.workers.f2, 1, "второму остался один")
+		eq(a.employed.near, 5, "работают все из ближнего дома")
+		eq(a.employed.far, 0, "дальний дом слишком далеко")
+	end
+)
+
+test("население: конфиг и жилые здания", function()
+	assert(PopulationConfig.workerShare > 0 and PopulationConfig.workerShare <= 1, "доля рабочих")
+	assert(
+		PopulationConfig.walkRadius > 0 and PopulationConfig.allocateSeconds > 0,
+		"радиус и период"
+	)
+	assert(
+		Buildings.barracks.residents and Buildings.barracks.cost == nil,
+		"барак бесплатный и жилой"
+	)
+	assert(
+		Buildings.house.residents and Buildings.house.cost,
+		"дом жилой и стоит материалов"
+	)
+	local workers = Population.workersOf(Buildings.barracks.residents :: number, PopulationConfig)
+	assert(
+		workers >= Recipes.forestry.workers,
+		"одного барака хватает на лесозаготовку"
+	)
+end)
+
+test("сохранение: жильцы дома проходят проверку", function()
+	local raw = {
+		version = RegionSave.VERSION,
+		savedAt = 1,
+		buildings = {
+			{ typeId = "house", x = 1, z = 1, rotation = 0, residents = 7.5 },
+			{ typeId = "barracks", x = 5, z = 1, rotation = 0, residents = -3 },
+		},
+		roads = {},
+	}
+	local snap = RegionSave.sanitize(raw, Buildings)
+	assert(snap, "снимок")
+	eq(snap.buildings[1].residents, 7.5, "жильцы")
+	eq(snap.buildings[2].residents, nil, "мусор отброшен")
+end)
+
+test(
+	"парк: заказы только в радиусе автопарка, ближний получатель первым",
+	function()
+		-- Дорога z = 0 от x = 0 до 20: автопарк у x = 0, лесопилки s2 (x = 15) и s (x = 20).
+		local stock, space = { f = 6 }, { s = 20, s2 = 20 }
+		local fleet = makeFleet(stock, space)
+		Logistics.addTruck(fleet, Logistics.newTruck("t1", "depot", { x = 0, z = 0 }))
+		local near = table.clone(truckConfig) :: any
+		near.serviceRadius = 16
+		Logistics.stepFleet(fleet, 0.25, near)
+		local t = fleet.trucks[1]
+		eq(t.state, "to_pickup", "едет")
+		assert(t.job, "заказ есть")
+		eq(t.job.to, "s2", "s (x = 20) вне радиуса, везёт в s2")
+
+		local stock2, space2 = { f = 6 }, { s = 20 }
+		local fleet2 = makeFleet(stock2, space2)
+		Logistics.addTruck(fleet2, Logistics.newTruck("t1", "depot", { x = 0, z = 0 }))
+		local tight = table.clone(truckConfig) :: any
+		tight.serviceRadius = 5
+		Logistics.stepFleet(fleet2, 0.25, tight)
+		eq(fleet2.trucks[1].state, "idle", "лесозаготовка (x = 10) вне радиуса 5")
+
+		local jobs = Logistics.candidates(
+			{ { id = "f", resource = "logs", amount = 6, full = false } },
+			{ { id = "s", resource = "logs", amount = 20 }, { id = "s2", resource = "logs", amount = 5 } },
+			truckConfig,
+			function(_from, to)
+				return if to == "s2" then 5 else 10
+			end
+		)
+		eq(
+			jobs[1].to,
+			"s2",
+			"ближний получатель первым, хоть места у него меньше"
 		)
 	end
 )
