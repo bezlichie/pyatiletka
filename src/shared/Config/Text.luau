@@ -49,6 +49,10 @@ return {
 		workers = { ru = "рабочие", en = "workers" },
 		residents = { ru = "жильцов", en = "residents" },
 		working = { ru = "работают", en = "working" },
+		happiness = { ru = "довольство", en = "happiness" },
+		fed = { ru = "еда есть", en = "fed" },
+		hungry = { ru = "нет еды", en = "no food" },
+		noShop = { ru = "нет магазина рядом", en = "no shop nearby" },
 	} :: { [string]: Text },
 
 	buildMode = {

@@ -43,6 +43,11 @@ type Entry = {
 	order: number, -- порядковый номер здания: раньше поставленные первыми получают рабочих
 	residents: number?, -- жилое здание: сколько живёт сейчас (есть только у достроенного)
 	employed: number?, -- жилое здание: сколько жильцов работает
+	happiness: number?, -- жилое здание: довольство 0–100
+	foodDebt: number?, -- жилое здание: накопленная, но ещё не съеденная еда
+	fed: boolean?, -- жилое здание: получило ли последнюю порцию еды
+	hasShop: boolean?, -- жилое здание: есть ли магазин в радиусе
+	stock: { [string]: number }?, -- магазин: что лежит на складе
 	workers: number, -- сколько рабочих сейчас на этом здании
 }
 
@@ -212,6 +217,27 @@ local function updateLabel(entry: Entry)
 			lines,
 			`{Text.labels.residents.ru}: {math.floor(residents)}/{capacity}, {Text.labels.working.ru}: {entry.employed or 0}`
 		)
+		local happiness = math.floor(entry.happiness or 0)
+		local food = if not entry.hasShop
+			then Text.labels.noShop.ru
+			elseif entry.fed then Text.labels.fed.ru
+			else Text.labels.hungry.ru
+		local color = if happiness < PopulationConfig.leaveBelowHappiness
+			then "#ff8a7a"
+			elseif happiness < PopulationConfig.growMinHappiness then "#ffc46b"
+			else "#ffffff"
+		table.insert(lines, `<font color="{color}">{Text.labels.happiness.ru} {happiness}% · {food}</font>`)
+	end
+	local stock = entry.stock
+	local stores = BuildingsConfig[entry.typeId].stores
+	if stock and stores then
+		local parts = {}
+		for resource, cap in stores do
+			local res = Text.resources[resource]
+			table.insert(parts, `{if res then res.ru else resource} {stock[resource] or 0}/{cap}`)
+		end
+		table.sort(parts)
+		table.insert(lines, table.concat(parts, ", "))
 	end
 	if entry.note then
 		table.insert(lines, entry.note)
@@ -288,7 +314,11 @@ local function create(
 		setSiteLook(model, true)
 	end
 	if def.residents and entry.construction == nil then
-		entry.residents = 0 -- жильцы въезжают постепенно (Population.grow)
+		entry.residents = 0 -- жильцы въезжают постепенно (Population.migrate)
+		entry.happiness = PopulationConfig.startHappiness
+	end
+	if def.stores then
+		entry.stock = {}
 	end
 	checkConnection(entry)
 	model.Parent = folder
@@ -343,6 +373,21 @@ function BuildingService.snapshot(inTransit: { [string]: { [string]: number } }?
 		end
 		if entry.residents then
 			save.residents = entry.residents
+			save.happiness = entry.happiness
+		end
+		local stock = entry.stock
+		if stock then
+			local saved = table.clone(stock)
+			local stores = BuildingsConfig[entry.typeId].stores
+			if cargo and stores then
+				for resource, amount in cargo do
+					local cap = stores[resource]
+					if cap then
+						saved[resource] = math.min((saved[resource] or 0) + amount, cap)
+					end
+				end
+			end
+			save.stock = saved
 		end
 		table.insert(result, save)
 	end
@@ -383,6 +428,18 @@ function BuildingService.restore(save: RegionSave.BuildingSave): boolean
 	local capacity = BuildingsConfig[entry.typeId].residents
 	if entry.residents and capacity and save.residents then
 		entry.residents = math.min(save.residents, capacity)
+	end
+	if entry.residents and save.happiness then
+		entry.happiness = math.clamp(save.happiness, 0, 100)
+	end
+	local stores = BuildingsConfig[entry.typeId].stores
+	if entry.stock and stores and save.stock then
+		for resource, amount in save.stock do
+			local cap = stores[resource]
+			if cap then
+				entry.stock[resource] = math.min(amount, cap)
+			end
+		end
 	end
 	sinceAllocate = math.huge
 	updateLabel(entry)
@@ -464,6 +521,12 @@ function BuildingService.deliver(id: string, resource: string, amount: number): 
 		accepted = Construction.deliver(entry.construction, resource, amount)
 	elseif entry.recipe and entry.state then
 		accepted = Production.deliver(entry.recipe, entry.state, resource, amount)
+	elseif entry.stock then
+		local cap = (BuildingsConfig[entry.typeId].stores :: { [string]: number })[resource]
+		if cap and amount > 0 then
+			accepted = math.max(0, math.min(amount, cap - (entry.stock[resource] or 0)))
+			entry.stock[resource] = (entry.stock[resource] or 0) + accepted
+		end
 	end
 	updateLabel(entry)
 	return accepted
@@ -507,6 +570,13 @@ function BuildingService.demands(id: string): { Demand }
 	elseif entry.recipe and entry.state then
 		for resource in entry.recipe.inputs do
 			local space = entry.recipe.storage - (entry.state.input[resource] or 0)
+			if space > 0 then
+				table.insert(result, { resource = resource, amount = space })
+			end
+		end
+	elseif entry.stock then
+		for resource, cap in BuildingsConfig[entry.typeId].stores :: { [string]: number } do
+			local space = cap - (entry.stock[resource] or 0)
 			if space > 0 then
 				table.insert(result, { resource = resource, amount = space })
 			end
@@ -578,13 +648,15 @@ local function allocateWorkers()
 		table.insert(places, { id = entry.id, x = r.x, z = r.z, w = r.w, d = r.d, need = recipe.workers })
 	end
 	local result = Population.allocate(houses, places, PopulationConfig)
-	local population, working, jobs = 0, 0, 0
+	local population, working, jobs, happySum = 0, 0, 0, 0
 	for id, entry in entries do
 		entry.workers = result.workers[id] or 0
 		if entry.residents then
 			entry.employed = result.employed[id] or 0
-			population += math.floor(entry.residents)
+			local people = math.floor(entry.residents)
+			population += people
 			working += entry.employed :: number
+			happySum += people * (entry.happiness or 0)
 		end
 	end
 	for _, place in places do
@@ -596,6 +668,57 @@ local function allocateWorkers()
 		region:SetAttribute("Population", population)
 		region:SetAttribute("Working", working)
 		region:SetAttribute("Jobs", jobs)
+		-- Среднее довольство по жителям (пустые дома не считаются).
+		region:SetAttribute("Happiness", if population > 0 then math.floor(happySum / population) else 0)
+	end
+end
+
+-- Накормить дома из магазинов в радиусе (Population.feed).
+local function feedHouses(dt: number)
+	local eaters: { Population.Eater } = {}
+	local shops: { Population.Shop } = {}
+	for _, entry in entries do
+		local r
+		if entry.residents then
+			r = rectOf(entry)
+			table.insert(eaters, {
+				id = entry.id,
+				x = r.x,
+				z = r.z,
+				w = r.w,
+				d = r.d,
+				residents = entry.residents,
+				debt = entry.foodDebt or 0,
+				fed = entry.fed ~= false,
+			})
+		end
+		local stock = entry.stock
+		if stock and entry.construction == nil and BuildingsConfig[entry.typeId].stores then
+			r = r or rectOf(entry)
+			table.insert(
+				shops,
+				{ id = entry.id, x = r.x, z = r.z, w = r.w, d = r.d, stock = stock.food or 0 }
+			)
+		end
+	end
+	local result = Population.feed(eaters, shops, dt, PopulationConfig)
+	for id, n in result.taken do
+		local shop = entries[id]
+		if shop and shop.stock then
+			shop.stock.food = math.max(0, (shop.stock.food or 0) - n)
+		end
+	end
+	for _, eater in eaters do
+		local entry = entries[eater.id]
+		entry.foodDebt = result.debt[eater.id]
+		entry.fed = result.fed[eater.id]
+		entry.hasShop = false
+		for _, shop in shops do
+			if Population.gap(eater, shop) <= PopulationConfig.shopRadius then
+				entry.hasShop = true
+				break
+			end
+		end
 	end
 end
 
@@ -606,6 +729,7 @@ function BuildingService.tick(dt: number)
 		sinceAllocate = 0
 		allocateWorkers()
 	end
+	feedHouses(dt)
 	for _, entry in entries do
 		local site = entry.construction
 		if site then
@@ -615,6 +739,7 @@ function BuildingService.tick(dt: number)
 				setSiteLook(entry.model, false)
 				if BuildingsConfig[entry.typeId].residents then
 					entry.residents = 0
+					entry.happiness = PopulationConfig.startHappiness
 					sinceAllocate = math.huge
 				end
 				print(
@@ -625,7 +750,12 @@ function BuildingService.tick(dt: number)
 		else
 			local capacity = BuildingsConfig[entry.typeId].residents
 			if entry.residents and capacity then
-				entry.residents = Population.grow(entry.residents, capacity, dt, PopulationConfig)
+				-- Довольство идёт к цели по сытости, от него зависит въезд и отъезд.
+				local happiness =
+					Population.happiness(entry.happiness or 0, entry.fed ~= false, dt, PopulationConfig)
+				entry.happiness = happiness
+				entry.residents =
+					Population.migrate(entry.residents, capacity, happiness, dt, PopulationConfig)
 			end
 			local recipe, state = entry.recipe, entry.state
 			if recipe and state then

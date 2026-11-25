@@ -975,7 +975,10 @@ test(
 
 -- Население (этап 2, шаг 1)
 
-local popConfig = { workerShare = 0.5, walkRadius = 10, moveInPerSecond = 1 }
+local popConfig = table.clone(PopulationConfig) :: any
+popConfig.workerShare = 0.5
+popConfig.walkRadius = 10
+popConfig.moveInPerSecond = 1
 
 test("население: расстояние между краями зданий", function()
 	local a = { x = 0, z = 0, w = 2, d = 2 }
@@ -1088,6 +1091,132 @@ test(
 		)
 	end
 )
+
+-- Еда и довольство (этап 2, шаг 2)
+
+local foodConfig = table.clone(PopulationConfig) :: any
+foodConfig.foodPerResidentPerSecond = 0.1 -- 10 жильцов съедают 1 продукт в секунду
+foodConfig.shopRadius = 5
+
+local function eater(id: string, x: number, residents: number)
+	return { id = id, x = x, z = 0, w = 2, d = 2, residents = residents, debt = 0, fed = true }
+end
+
+test("еда: дом забирает порцию из ближнего магазина", function()
+	local houses = { eater("h", 0, 10) }
+	local shops = {
+		{ id = "far", x = 6, z = 0, w = 2, d = 2, stock = 5 },
+		{ id = "near", x = 3, z = 0, w = 2, d = 2, stock = 5 },
+	}
+	local r = Population.feed(houses, shops, 1, foodConfig)
+	eq(r.taken.near, 1, "из ближнего")
+	eq(r.taken.far, nil, "дальний не тронут")
+	eq(r.fed.h, true, "сыт")
+end)
+
+test(
+	"еда: пустой магазин — голод, без магазина — голод сразу",
+	function()
+		local r = Population.feed(
+			{ eater("h", 0, 10) },
+			{ { id = "s", x = 3, z = 0, w = 2, d = 2, stock = 0 } },
+			1,
+			foodConfig
+		)
+		eq(r.fed.h, false, "магазин пуст")
+		assert(r.debt.h <= 1, "долг не копится сверх порции")
+		local r2 = Population.feed(
+			{ eater("h", 0, 10) },
+			{ { id = "s", x = 30, z = 0, w = 2, d = 2, stock = 9 } },
+			1,
+			foodConfig
+		)
+		eq(r2.fed.h, false, "магазин далеко")
+		eq(r2.taken.s, nil, "из дальнего не берёт")
+	end
+)
+
+test("еда: маленький дом не голодает между порциями", function()
+	local h = eater("h", 0, 2) -- 0,2 продукта в секунду
+	local shops = { { id = "s", x = 3, z = 0, w = 2, d = 2, stock = 0 } }
+	local r = Population.feed({ h }, shops, 1, foodConfig)
+	eq(r.fed.h, true, "порция ещё не подошла")
+	eq(r.debt.h, 0.2, "долг копится")
+end)
+
+test(
+	"довольство: идёт к цели, голодные уезжают до остатка, сытые въезжают",
+	function()
+		eq(
+			Population.happiness(50, true, 10, foodConfig),
+			50 + 10 * foodConfig.happinessRatePerSecond,
+			"растёт"
+		)
+		eq(
+			Population.happiness(1, false, 100, foodConfig),
+			foodConfig.hungryHappiness,
+			"падает до цели"
+		)
+		local cap = 10
+		local low = foodConfig.leaveBelowHappiness - 1
+		eq(
+			Population.migrate(10, cap, low, 10, foodConfig),
+			10 - 10 * foodConfig.leavePerSecond,
+			"уезжают"
+		)
+		eq(
+			Population.migrate(10, cap, low, 1e6, foodConfig),
+			cap * foodConfig.leaveFloorShare,
+			"остаток остаётся"
+		)
+		local mid = (foodConfig.leaveBelowHappiness + foodConfig.growMinHappiness) / 2
+		eq(Population.migrate(5, cap, mid, 10, foodConfig), 5, "середина — без движения")
+		assert(Population.migrate(5, cap, 100, 4, foodConfig) > 5, "довольные въезжают")
+	end
+)
+
+test("еда: конфиг и здания цепочки", function()
+	assert(
+		Recipes.farm.outputs.grain and Recipes.food_plant.inputs.grain,
+		"ферма кормит пищекомбинат"
+	)
+	assert(Recipes.food_plant.outputs.food, "пищекомбинат делает продукты")
+	assert(Buildings.farm and Buildings.food_plant, "здания цепочки")
+	assert(
+		Buildings.shop.stores and Buildings.shop.stores.food,
+		"магазин принимает продукты"
+	)
+	assert(
+		PopulationConfig.leaveBelowHappiness < PopulationConfig.growMinHappiness,
+		"пороги довольства"
+	)
+	assert(
+		PopulationConfig.startHappiness >= PopulationConfig.growMinHappiness,
+		"новый дом заселяется"
+	)
+	local orders = {}
+	for id, def in Buildings do
+		assert(
+			not orders[def.order],
+			`порядок кнопки {def.order} у {id} не повторяется`
+		)
+		orders[def.order] = true
+	end
+	local raw = {
+		version = RegionSave.VERSION,
+		savedAt = 1,
+		buildings = {
+			{ typeId = "shop", x = 1, z = 1, rotation = 0, stock = { food = 7, bad = -1 } },
+			{ typeId = "house", x = 9, z = 1, rotation = 0, residents = 3, happiness = 140 },
+		},
+		roads = {},
+	}
+	local snap = RegionSave.sanitize(raw, Buildings)
+	assert(snap, "снимок")
+	eq((snap.buildings[1].stock :: any).food, 7, "склад магазина")
+	eq((snap.buildings[1].stock :: any).bad, nil, "мусор отброшен")
+	eq(snap.buildings[2].happiness, nil, "довольство вне 0–100 отброшено")
+end)
 
 print(`\nИтого: {passed} пройдено, {failed} упало`)
 if failed > 0 then
